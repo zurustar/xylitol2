@@ -19,7 +19,7 @@ A RFC3261-compliant SIP Server implemented in Go that functions as both a Statef
 │   ├── transaction/        # SIP transaction management
 │   ├── transport/          # UDP/TCP transport layer
 │   └── webadmin/           # Web-based administration interface
-├── config.yaml             # Sample configuration file
+├── config.sample.yaml      # Sample configuration file
 ├── go.mod                  # Go module definition
 └── README.md               # This file
 ```
@@ -42,7 +42,7 @@ A RFC3261-compliant SIP Server implemented in Go that functions as both a Statef
 
 ## Configuration
 
-The server is configured via a YAML configuration file. See `config.yaml` for an example configuration.
+The server is configured via a YAML configuration file. See `config.sample.yaml` for an example configuration.
 
 ## Building and Running
 
