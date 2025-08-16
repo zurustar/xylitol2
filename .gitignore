@@ -13,3 +13,54 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Log files
+*.log
+logs/
+log/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+database/
+db/
+
+# Build output
+/bin/
+/build/
+/dist/
+sip-server
+sip-server.exe
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# Configuration files with sensitive data
+config.yaml
+config.local.yaml
+config.prod.yaml
+.env
+.env.local
+
+# Keep sample configuration files
+!config.sample.yaml
+!config.example.yaml

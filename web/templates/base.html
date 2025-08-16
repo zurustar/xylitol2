@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.Title}} - SIP Server Admin</title>
+    <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+    <header>
+        <nav class="navbar">
+            <div class="nav-brand">
+                <h1>SIP Server Admin</h1>
+            </div>
+            <div class="nav-links">
+                <a href="/admin">Dashboard</a>
+                <a href="/admin/users/new">Add User</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container">
+        {{template "content" .}}
+    </main>
+
+    <footer>
+        <p>&copy; 2024 SIP Server Administration Interface</p>
+    </footer>
+
+    <script src="/static/js/admin.js"></script>
+</body>
+</html>

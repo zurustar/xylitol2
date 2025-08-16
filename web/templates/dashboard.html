@@ -1,0 +1,91 @@
+{{define "content"}}
+<div class="dashboard">
+    <h2>{{.Title}}</h2>
+    
+    <div class="stats">
+        <div class="stat-card">
+            <h3>Total Users</h3>
+            <p class="stat-number">{{len .Users}}</p>
+        </div>
+        <div class="stat-card">
+            <h3>Active Users</h3>
+            <p class="stat-number">{{range .Users}}{{if .Enabled}}{{end}}{{end}}</p>
+        </div>
+    </div>
+
+    <div class="users-section">
+        <div class="section-header">
+            <h3>SIP Users</h3>
+            <div class="header-actions">
+                <div class="search-container">
+                    <input type="text" id="userSearch" placeholder="Search users..." class="search-input">
+                </div>
+                <a href="/admin/users/new" class="btn btn-primary">Add New User</a>
+            </div>
+        </div>
+
+        <div id="bulk-actions" class="bulk-actions" style="display: none;">
+            <span>Selected <span id="selected-count">0</span> user(s)</span>
+            <button class="btn btn-sm btn-danger" onclick="bulkDeleteUsers()">Delete Selected</button>
+        </div>
+
+        <div class="users-table">
+            <table>
+                <thead>
+                    <tr>
+                        <th>
+                            <input type="checkbox" id="select-all" onchange="selectAllUsers()">
+                        </th>
+                        <th>Username</th>
+                        <th>Realm</th>
+                        <th>Status</th>
+                        <th>Created</th>
+                        <th>Last Updated</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Users}}
+                    <tr class="user-row">
+                        <td>
+                            <input type="checkbox" class="user-checkbox" 
+                                   data-user-id="{{.ID}}" 
+                                   data-username="{{.Username}}" 
+                                   data-realm="{{.Realm}}"
+                                   onchange="updateBulkActions()">
+                        </td>
+                        <td class="username">{{.Username}}</td>
+                        <td class="realm">{{.Realm}}</td>
+                        <td>
+                            <span class="status {{if .Enabled}}enabled{{else}}disabled{{end}}">
+                                {{if .Enabled}}Enabled{{else}}Disabled{{end}}
+                            </span>
+                            <button class="status-toggle btn-link" 
+                                    data-user-id="{{.ID}}" 
+                                    data-username="{{.Username}}" 
+                                    data-realm="{{.Realm}}" 
+                                    data-enabled="{{.Enabled}}"
+                                    title="Toggle user status">
+                                ⚙️
+                            </button>
+                        </td>
+                        <td>{{formatTime .CreatedAt}}</td>
+                        <td>{{formatTime .UpdatedAt}}</td>
+                        <td class="actions">
+                            <a href="/admin/users/edit/{{.Username}}/{{.Realm}}" class="btn btn-sm btn-secondary" title="Edit user">Edit</a>
+                            <button class="btn btn-sm btn-danger" onclick="deleteUser('{{.Username}}', '{{.Realm}}', {{.ID}})" title="Delete user">Delete</button>
+                        </td>
+                    </tr>
+                    {{else}}
+                    <tr>
+                        <td colspan="7" class="no-data">No users found. <a href="/admin/users/new">Create your first user</a></td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{template "base.html" .}}

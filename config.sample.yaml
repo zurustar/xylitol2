@@ -1,0 +1,23 @@
+server:
+  udp_port: 5060
+  tcp_port: 5060
+
+database:
+  path: "./sipserver.db"
+
+authentication:
+  realm: "sipserver.local"
+  nonce_expiry: 300
+
+session_timer:
+  default_expires: 1800
+  min_se: 90
+  max_se: 7200
+
+web_admin:
+  port: 8080
+  enabled: true
+
+logging:
+  level: "debug"
+  file: "./sipserver.log"

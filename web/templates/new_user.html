@@ -1,0 +1,44 @@
+{{define "content"}}
+<div class="form-container">
+    <h2>{{.Title}}</h2>
+    
+    <form id="userForm" method="POST" action="/admin/users">
+        <div class="form-group">
+            <label for="username">Username:</label>
+            <input type="text" id="username" name="username" required placeholder="e.g., alice">
+            <span class="error-message" id="username-error"></span>
+            <small class="form-help">Username can contain letters, numbers, dots, underscores, and hyphens</small>
+        </div>
+
+        <div class="form-group">
+            <label for="realm">Realm:</label>
+            <input type="text" id="realm" name="realm" required placeholder="e.g., example.com">
+            <span class="error-message" id="realm-error"></span>
+            <small class="form-help">Realm should be a valid domain name</small>
+        </div>
+
+        <div class="form-group">
+            <label for="password">Password:</label>
+            <input type="password" id="password" name="password" required>
+            <div class="password-strength">
+                <div class="password-strength-bar" id="password-strength-bar"></div>
+            </div>
+            <span class="error-message" id="password-error"></span>
+            <small class="form-help">Password must be at least 6 characters with uppercase, lowercase, and number</small>
+        </div>
+
+        <div class="form-group">
+            <label for="confirm-password">Confirm Password:</label>
+            <input type="password" id="confirm-password" name="confirm-password" required>
+            <span class="error-message" id="confirm-password-error"></span>
+        </div>
+
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Create User</button>
+            <a href="/admin" class="btn btn-secondary">Cancel</a>
+        </div>
+    </form>
+</div>
+{{end}}
+
+{{template "base.html" .}}
