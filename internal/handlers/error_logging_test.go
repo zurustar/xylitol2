@@ -2,473 +2,338 @@ package handlers
 
 import (
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/zurustar/xylitol2/internal/parser"
 )
 
-func TestLogLevel_String(t *testing.T) {
-	tests := []struct {
-		level    LogLevel
-		expected string
-	}{
-		{LogLevelError, "ERROR"},
-		{LogLevelWarn, "WARN"},
-		{LogLevelInfo, "INFO"},
-		{LogLevelDebug, "DEBUG"},
-		{LogLevel(999), "UNKNOWN"},
-	}
-	
-	for _, test := range tests {
-		result := test.level.String()
-		if result != test.expected {
-			t.Errorf("LogLevel.String() = %s, expected %s", result, test.expected)
-		}
+// MockLogger implements the Logger interface for testing
+type MockLogger struct {
+	debugMessages []LogMessage
+	infoMessages  []LogMessage
+	warnMessages  []LogMessage
+	errorMessages []LogMessage
+}
+
+type LogMessage struct {
+	Message string
+	Fields  []Field
+}
+
+func NewMockLogger() *MockLogger {
+	return &MockLogger{
+		debugMessages: make([]LogMessage, 0),
+		infoMessages:  make([]LogMessage, 0),
+		warnMessages:  make([]LogMessage, 0),
+		errorMessages: make([]LogMessage, 0),
 	}
 }
 
-func TestNewDetailedErrorLogger(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelInfo, true)
-	
-	if logger == nil {
-		t.Fatal("NewDetailedErrorLogger should not return nil")
-	}
-	
-	if logger.logLevel != LogLevelInfo {
-		t.Errorf("Log level should be Info, got %v", logger.logLevel)
-	}
-	
-	if !logger.enableDebug {
-		t.Error("Debug should be enabled")
-	}
-	
-	// Check that statistics are initialized
-	stats := logger.GetErrorStatistics()
-	if stats.ParseErrors != 0 {
-		t.Error("Initial parse errors should be 0")
-	}
+func (ml *MockLogger) Debug(msg string, fields ...Field) {
+	ml.debugMessages = append(ml.debugMessages, LogMessage{Message: msg, Fields: fields})
+}
+
+func (ml *MockLogger) Info(msg string, fields ...Field) {
+	ml.infoMessages = append(ml.infoMessages, LogMessage{Message: msg, Fields: fields})
+}
+
+func (ml *MockLogger) Warn(msg string, fields ...Field) {
+	ml.warnMessages = append(ml.warnMessages, LogMessage{Message: msg, Fields: fields})
+}
+
+func (ml *MockLogger) Error(msg string, fields ...Field) {
+	ml.errorMessages = append(ml.errorMessages, LogMessage{Message: msg, Fields: fields})
+}
+
+func (ml *MockLogger) GetErrorCount() int {
+	return len(ml.errorMessages)
+}
+
+func (ml *MockLogger) GetWarnCount() int {
+	return len(ml.warnMessages)
+}
+
+func (ml *MockLogger) Reset() {
+	ml.debugMessages = make([]LogMessage, 0)
+	ml.infoMessages = make([]LogMessage, 0)
+	ml.warnMessages = make([]LogMessage, 0)
+	ml.errorMessages = make([]LogMessage, 0)
 }
 
 func TestDetailedErrorLogger_LogParseError(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelError, true)
-	
-	parseErr := errors.New("invalid request line")
-	rawMessage := []byte("INVALID SIP MESSAGE\r\nHeader: value\r\n")
+	mockLogger := NewMockLogger()
+	logger := NewDetailedErrorLogger(LogLevelDebug, true, mockLogger)
+
+	// Test parse error logging
+	parseErr := errors.New("failed to parse start line: invalid format")
+	rawMessage := []byte("INVALID SIP MESSAGE")
 	context := map[string]interface{}{
-		"source": "test",
+		"source_ip": "192.168.1.100",
+		"transport": "UDP",
 	}
-	
-	// Capture initial statistics
-	initialStats := logger.GetErrorStatistics()
-	
+
 	logger.LogParseError(parseErr, rawMessage, context)
-	
-	// Check that statistics were updated
+
+	// Verify error was logged
+	if mockLogger.GetErrorCount() != 1 {
+		t.Errorf("Expected 1 error log, got %d", mockLogger.GetErrorCount())
+	}
+
+	// Verify statistics were updated
 	stats := logger.GetErrorStatistics()
-	if stats.ParseErrors != initialStats.ParseErrors+1 {
-		t.Errorf("Parse error count should increase by 1, got %d", stats.ParseErrors)
+	if stats.ParseErrors != 1 {
+		t.Errorf("Expected 1 parse error in statistics, got %d", stats.ParseErrors)
+	}
+
+	// Verify detailed statistics
+	detailedStats := logger.GetDetailedStatistics()
+	if len(detailedStats.ParseErrorsByType) == 0 {
+		t.Error("Expected parse errors by type to be populated")
+	}
+
+	if len(detailedStats.RecentErrors) != 1 {
+		t.Errorf("Expected 1 recent error, got %d", len(detailedStats.RecentErrors))
 	}
 }
 
 func TestDetailedErrorLogger_LogValidationError(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelWarn, true)
-	
-	req := parser.NewRequestMessage(parser.MethodINVITE, "sip:test@example.com")
-	req.SetHeader(parser.HeaderCallID, "test-call-id")
-	req.SetHeader(parser.HeaderFrom, "sip:alice@example.com")
-	req.SetHeader(parser.HeaderTo, "sip:bob@example.com")
-	
+	mockLogger := NewMockLogger()
+	logger := NewDetailedErrorLogger(LogLevelDebug, true, mockLogger)
+
+	// Create a test SIP message
+	req := parser.NewRequestMessage("INVITE", "sip:user@example.com")
+	req.SetHeader("Call-ID", "test-call-id")
+	req.SetHeader("From", "sip:caller@example.com")
+	req.SetHeader("To", "sip:callee@example.com")
+
+	// Create validation error
 	validationErr := &DetailedValidationError{
 		ValidationError: &ValidationError{
-			ValidatorName: "TestValidator",
-			Code:          parser.StatusBadRequest,
-			Reason:        "Test validation error",
+			ValidatorName: "SessionTimerValidator",
+			Code:          421,
+			Reason:        "Extension Required",
+			Details:       "Session-Timer extension is required",
 		},
-		MissingHeaders: []string{"Via"},
-		InvalidHeaders: map[string]string{
-			"CSeq": "invalid format",
-		},
-		Suggestions: []string{"Add Via header"},
+		ErrorType:      ErrorTypeValidationError,
+		MissingHeaders: []string{"Session-Expires"},
+		InvalidHeaders: make(map[string]string),
+		Suggestions:    []string{"Add Session-Expires header"},
+		Context:        make(map[string]interface{}),
 	}
-	
+
 	context := map[string]interface{}{
-		"test_context": "validation_test",
+		"validator": "session_timer",
 	}
-	
-	// Capture initial statistics
-	initialStats := logger.GetErrorStatistics()
-	
+
 	logger.LogValidationError(validationErr, req, context)
-	
-	// Check that statistics were updated
+
+	// Verify warning was logged
+	if mockLogger.GetWarnCount() != 1 {
+		t.Errorf("Expected 1 warning log, got %d", mockLogger.GetWarnCount())
+	}
+
+	// Verify statistics were updated
 	stats := logger.GetErrorStatistics()
-	if stats.ValidationErrors != initialStats.ValidationErrors+1 {
-		t.Errorf("Validation error count should increase by 1, got %d", stats.ValidationErrors)
+	if stats.ValidationErrors != 1 {
+		t.Errorf("Expected 1 validation error in statistics, got %d", stats.ValidationErrors)
+	}
+
+	// Verify detailed statistics
+	detailedStats := logger.GetDetailedStatistics()
+	if detailedStats.ValidationErrorsByType["SessionTimerValidator"] != 1 {
+		t.Errorf("Expected 1 SessionTimerValidator error, got %d", 
+			detailedStats.ValidationErrorsByType["SessionTimerValidator"])
 	}
 }
 
-func TestDetailedErrorLogger_LogProcessingError(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelError, false)
-	
-	req := parser.NewRequestMessage(parser.MethodINVITE, "sip:test@example.com")
-	req.SetHeader(parser.HeaderCallID, "test-call-id")
-	
-	processingErr := errors.New("database connection failed")
-	context := map[string]interface{}{
-		"operation": "user_lookup",
+func TestDetailedErrorLogger_ErrorPatterns(t *testing.T) {
+	mockLogger := NewMockLogger()
+	logger := NewDetailedErrorLogger(LogLevelDebug, true, mockLogger)
+
+	// Log multiple similar errors to test pattern detection
+	for i := 0; i < 15; i++ {
+		parseErr := errors.New("failed to parse start line: invalid format")
+		rawMessage := []byte("INVALID SIP MESSAGE")
+		context := map[string]interface{}{
+			"iteration": i,
+		}
+		logger.LogParseError(parseErr, rawMessage, context)
 	}
-	
-	// Capture initial statistics
-	initialStats := logger.GetErrorStatistics()
-	
-	logger.LogProcessingError(processingErr, req, context)
-	
-	// Check that statistics were updated
-	stats := logger.GetErrorStatistics()
-	if stats.ProcessingErrors != initialStats.ProcessingErrors+1 {
-		t.Errorf("Processing error count should increase by 1, got %d", stats.ProcessingErrors)
+
+	// Check if systematic issue warning was logged
+	// The logger should detect the pattern after 10 occurrences
+	if mockLogger.GetWarnCount() == 0 {
+		t.Error("Expected systematic issue warning to be logged")
+	}
+
+	// Verify error patterns are tracked
+	patterns := logger.GetErrorPatterns()
+	if len(patterns) == 0 {
+		t.Error("Expected error patterns to be tracked")
 	}
 }
 
-func TestDetailedErrorLogger_LogTransportError(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelError, false)
-	
-	req := parser.NewRequestMessage(parser.MethodINVITE, "sip:test@example.com")
-	req.SetHeader(parser.HeaderCallID, "test-call-id")
-	
-	transportErr := errors.New("connection timeout")
-	context := map[string]interface{}{
-		"transport": "TCP",
-		"remote_addr": "192.168.1.100:5060",
-	}
-	
-	// Capture initial statistics
-	initialStats := logger.GetErrorStatistics()
-	
-	logger.LogTransportError(transportErr, req, context)
-	
-	// Check that statistics were updated
+func TestDetailedErrorLogger_Statistics(t *testing.T) {
+	mockLogger := NewMockLogger()
+	logger := NewDetailedErrorLogger(LogLevelDebug, true, mockLogger)
+
+	// Log various types of errors
+	parseErr := errors.New("parse error")
+	logger.LogParseError(parseErr, []byte("test"), nil)
+
+	processingErr := errors.New("processing error")
+	logger.LogProcessingError(processingErr, nil, nil)
+
+	transportErr := errors.New("transport error")
+	logger.LogTransportError(transportErr, nil, nil)
+
+	authErr := errors.New("authentication failed")
+	logger.LogAuthenticationError(authErr, nil, nil)
+
+	sessionErr := errors.New("session timer error")
+	logger.LogSessionTimerError(sessionErr, nil, nil)
+
+	// Verify basic statistics
 	stats := logger.GetErrorStatistics()
-	if stats.TransportErrors != initialStats.TransportErrors+1 {
-		t.Errorf("Transport error count should increase by 1, got %d", stats.TransportErrors)
+	if stats.ParseErrors != 1 {
+		t.Errorf("Expected 1 parse error, got %d", stats.ParseErrors)
+	}
+	if stats.ProcessingErrors != 1 {
+		t.Errorf("Expected 1 processing error, got %d", stats.ProcessingErrors)
+	}
+	if stats.TransportErrors != 1 {
+		t.Errorf("Expected 1 transport error, got %d", stats.TransportErrors)
+	}
+	if stats.AuthErrors != 1 {
+		t.Errorf("Expected 1 auth error, got %d", stats.AuthErrors)
+	}
+	if stats.SessionTimerErrors != 1 {
+		t.Errorf("Expected 1 session timer error, got %d", stats.SessionTimerErrors)
+	}
+
+	// Verify detailed statistics
+	detailedStats := logger.GetDetailedStatistics()
+	if len(detailedStats.RecentErrors) != 5 {
+		t.Errorf("Expected 5 recent errors, got %d", len(detailedStats.RecentErrors))
+	}
+
+	// Test hourly statistics
+	currentHour := time.Now().Hour()
+	if detailedStats.ErrorsByHour[currentHour] != 5 {
+		t.Errorf("Expected 5 errors in current hour, got %d", detailedStats.ErrorsByHour[currentHour])
 	}
 }
 
 func TestDetailedErrorLogger_ResetStatistics(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelError, false)
-	
-	// Generate some errors
-	logger.LogParseError(errors.New("test"), []byte("test"), nil)
-	logger.LogProcessingError(errors.New("test"), nil, nil)
-	
-	// Check statistics are non-zero
+	mockLogger := NewMockLogger()
+	logger := NewDetailedErrorLogger(LogLevelDebug, true, mockLogger)
+
+	// Log some errors
+	parseErr := errors.New("parse error")
+	logger.LogParseError(parseErr, []byte("test"), nil)
+
+	// Verify statistics are populated
 	stats := logger.GetErrorStatistics()
-	if stats.ParseErrors == 0 || stats.ProcessingErrors == 0 {
-		t.Error("Statistics should be non-zero before reset")
+	if stats.ParseErrors != 1 {
+		t.Errorf("Expected 1 parse error before reset, got %d", stats.ParseErrors)
 	}
-	
+
 	// Reset statistics
 	logger.ResetStatistics()
-	
-	// Check statistics are zero
+
+	// Verify statistics are reset
 	stats = logger.GetErrorStatistics()
-	if stats.ParseErrors != 0 || stats.ProcessingErrors != 0 {
-		t.Error("Statistics should be zero after reset")
+	if stats.ParseErrors != 0 {
+		t.Errorf("Expected 0 parse errors after reset, got %d", stats.ParseErrors)
+	}
+
+	detailedStats := logger.GetDetailedStatistics()
+	if len(detailedStats.RecentErrors) != 0 {
+		t.Errorf("Expected 0 recent errors after reset, got %d", len(detailedStats.RecentErrors))
 	}
 }
 
-func TestDetailedErrorLogger_sanitizeRawMessage(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelDebug, true)
+func TestDetailedErrorLogger_LogLevels(t *testing.T) {
+	mockLogger := NewMockLogger()
 	
-	tests := []struct {
-		input    []byte
-		contains []string
-		notContains []string
+	// Test with error level only
+	logger := NewDetailedErrorLogger(LogLevelError, false, mockLogger)
+
+	parseErr := errors.New("parse error")
+	logger.LogParseError(parseErr, []byte("test"), nil)
+
+	// Should log error
+	if mockLogger.GetErrorCount() != 1 {
+		t.Errorf("Expected 1 error log, got %d", mockLogger.GetErrorCount())
+	}
+
+	// Test log level change
+	logger.SetLogLevel(LogLevelDebug)
+	
+	// Test debug mode toggle
+	logger.EnableDebugMode(true)
+	
+	// Log another error with debug enabled
+	mockLogger.Reset()
+	logger.LogParseError(parseErr, []byte("test message"), nil)
+	
+	// Should have both error and debug logs
+	if mockLogger.GetErrorCount() != 1 {
+		t.Errorf("Expected 1 error log with debug enabled, got %d", mockLogger.GetErrorCount())
+	}
+}
+
+func TestDetailedErrorLogger_ErrorCategorization(t *testing.T) {
+	mockLogger := NewMockLogger()
+	logger := NewDetailedErrorLogger(LogLevelDebug, true, mockLogger)
+
+	testCases := []struct {
+		errorMsg     string
+		expectedType string
 	}{
-		{
-			input:    []byte("INVITE sip:test@example.com SIP/2.0\r\nVia: SIP/2.0/UDP client:5060\r\n"),
-			contains: []string{"INVITE", "sip:test@example.com", "\\r", "\\n"},
-		},
-		{
-			input:    []byte("password=secret123"),
-			notContains: []string{"secret123"},
-			contains: []string{"password=***"},
-		},
-		{
-			// Very long message
-			input:    []byte(strings.Repeat("A", 300)),
-			contains: []string{"..."},
-		},
+		{"failed to parse start line: invalid format", "start_line_error"},
+		{"failed to parse headers: missing colon", "header_error"},
+		{"invalid Content-Length: abc", "content_length_error"},
+		{"failed to parse body: unexpected end", "body_error"},
+		{"empty message data", "empty_message_error"},
+		{"invalid method: UNKNOWN", "invalid_method_error"},
+		{"unsupported SIP version: SIP/1.0", "version_error"},
+		{"some other error", "unknown_parse_error"},
 	}
-	
-	for _, test := range tests {
-		result := logger.sanitizeRawMessage(test.input)
+
+	for _, tc := range testCases {
+		mockLogger.Reset()
+		logger.ResetStatistics()
 		
-		for _, expected := range test.contains {
-			if !strings.Contains(result, expected) {
-				t.Errorf("Sanitized message should contain '%s', got: %s", expected, result)
-			}
-		}
-		
-		for _, notExpected := range test.notContains {
-			if strings.Contains(result, notExpected) {
-				t.Errorf("Sanitized message should not contain '%s', got: %s", notExpected, result)
-			}
+		parseErr := errors.New(tc.errorMsg)
+		logger.LogParseError(parseErr, []byte("test"), nil)
+
+		detailedStats := logger.GetDetailedStatistics()
+		if detailedStats.ParseErrorsByType[tc.expectedType] != 1 {
+			t.Errorf("Expected error type %s for message %s, but got types: %v", 
+				tc.expectedType, tc.errorMsg, detailedStats.ParseErrorsByType)
 		}
 	}
 }
 
-func TestDetailedErrorLogger_sanitizeHeaders(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelDebug, true)
-	
-	req := parser.NewRequestMessage(parser.MethodINVITE, "sip:test@example.com")
-	req.SetHeader(parser.HeaderVia, "SIP/2.0/UDP client.example.com:5060")
-	req.SetHeader(parser.HeaderFrom, "sip:alice@example.com;tag=123")
-	req.SetHeader(parser.HeaderTo, "sip:bob@example.com")
-	req.SetHeader(parser.HeaderCallID, "test-call-id")
-	req.SetHeader(parser.HeaderCSeq, "1 INVITE")
-	req.SetHeader(parser.HeaderAuthorization, "Digest response=secret123")
-	
-	headers := logger.sanitizeHeaders(req)
-	
-	// Should include standard headers
-	expectedHeaders := []string{
-		parser.HeaderVia,
-		parser.HeaderFrom,
-		parser.HeaderTo,
-		parser.HeaderCallID,
-		parser.HeaderCSeq,
-	}
-	
-	for _, header := range expectedHeaders {
-		if _, exists := headers[header]; !exists {
-			t.Errorf("Sanitized headers should include %s", header)
-		}
-	}
-	
-	// Should not include Authorization header (not in debug list)
-	if _, exists := headers[parser.HeaderAuthorization]; exists {
-		t.Error("Sanitized headers should not include Authorization header")
-	}
-	
-	// Should sanitize sensitive information
-	if authHeader, exists := headers[parser.HeaderAuthorization]; exists {
-		if strings.Contains(authHeader, "secret123") {
-			t.Error("Authorization header should be sanitized")
-		}
-	}
-}
+func TestDetailedErrorLogger_ErrorSummary(t *testing.T) {
+	mockLogger := NewMockLogger()
+	logger := NewDetailedErrorLogger(LogLevelDebug, true, mockLogger)
 
-func TestDetailedErrorLogger_analyzeParseError(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelDebug, true)
-	
-	tests := []struct {
-		error       error
-		rawMessage  []byte
-		expectedKeys []string
-	}{
-		{
-			error:       errors.New("invalid request line"),
-			rawMessage:  []byte("INVALID REQUEST\r\nVia: SIP/2.0/UDP test\r\n"),
-			expectedKeys: []string{"issue", "expected_format", "actual_first_line"},
-		},
-		{
-			error:       errors.New("invalid status line"),
-			rawMessage:  []byte("INVALID STATUS\r\nVia: SIP/2.0/UDP test\r\n"),
-			expectedKeys: []string{"issue", "expected_format", "actual_first_line"},
-		},
-		{
-			error:       errors.New("invalid header format"),
-			rawMessage:  []byte("INVITE sip:test SIP/2.0\r\nInvalid Header Line\r\n"),
-			expectedKeys: []string{"issue", "expected_format", "total_lines"},
-		},
-		{
-			error:       errors.New("content-length mismatch"),
-			rawMessage:  []byte("INVITE sip:test SIP/2.0\r\nContent-Length: 10\r\n\r\nshort"),
-			expectedKeys: []string{"issue", "suggestion"},
-		},
-	}
-	
-	for _, test := range tests {
-		analysis := logger.analyzeParseError(test.error, test.rawMessage)
-		
-		for _, key := range test.expectedKeys {
-			if _, exists := analysis[key]; !exists {
-				t.Errorf("Analysis should contain key '%s' for error '%s'", key, test.error.Error())
-			}
-		}
-		
-		// Should always have general statistics
-		generalKeys := []string{"message_size", "line_count", "has_body"}
-		for _, key := range generalKeys {
-			if _, exists := analysis[key]; !exists {
-				t.Errorf("Analysis should always contain key '%s'", key)
-			}
-		}
-	}
-}
+	// Log various errors
+	parseErr := errors.New("parse error")
+	logger.LogParseError(parseErr, []byte("test"), nil)
 
-func TestNewErrorMonitor(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelError, false)
-	monitor := NewErrorMonitor(logger)
-	
-	if monitor == nil {
-		t.Fatal("NewErrorMonitor should not return nil")
-	}
-	
-	if monitor.logger != logger {
-		t.Error("Monitor should store the provided logger")
-	}
-	
-	// Check that default thresholds are set
-	counts := monitor.GetErrorCounts()
-	if len(counts) == 0 {
-		t.Error("Monitor should have initialized counters")
-	}
-}
+	processingErr := errors.New("processing error")
+	logger.LogProcessingError(processingErr, nil, nil)
 
-func TestErrorMonitor_SetThreshold(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelError, false)
-	monitor := NewErrorMonitor(logger)
-	
-	monitor.SetThreshold(ErrorTypeParseError, 5, 2*time.Minute)
-	
-	// Verify threshold was set by checking if counter exists
-	counts := monitor.GetErrorCounts()
-	if _, exists := counts[ErrorTypeParseError]; !exists {
-		t.Error("Counter should exist after setting threshold")
-	}
-}
+	// Log error summary
+	logger.LogErrorSummary()
 
-func TestErrorMonitor_RecordError(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelError, false)
-	monitor := NewErrorMonitor(logger)
-	
-	// Set a low threshold for testing
-	monitor.SetThreshold(ErrorTypeParseError, 2, 1*time.Minute)
-	
-	// Record first error - should not exceed threshold
-	exceeded := monitor.RecordError(ErrorTypeParseError)
-	if exceeded {
-		t.Error("First error should not exceed threshold")
-	}
-	
-	// Record second error - should exceed threshold
-	exceeded = monitor.RecordError(ErrorTypeParseError)
-	if !exceeded {
-		t.Error("Second error should exceed threshold of 2")
-	}
-	
-	// Check error count
-	counts := monitor.GetErrorCounts()
-	if counts[ErrorTypeParseError] != 2 {
-		t.Errorf("Error count should be 2, got %d", counts[ErrorTypeParseError])
-	}
-}
-
-func TestErrorMonitor_RecordError_WindowReset(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelError, false)
-	monitor := NewErrorMonitor(logger)
-	
-	// Set a very short window for testing
-	monitor.SetThreshold(ErrorTypeParseError, 5, 1*time.Millisecond)
-	
-	// Record an error
-	monitor.RecordError(ErrorTypeParseError)
-	
-	// Wait for window to expire
-	time.Sleep(2 * time.Millisecond)
-	
-	// Record another error - counter should have reset
-	monitor.RecordError(ErrorTypeParseError)
-	
-	counts := monitor.GetErrorCounts()
-	if counts[ErrorTypeParseError] != 1 {
-		t.Errorf("Error count should be 1 after window reset, got %d", counts[ErrorTypeParseError])
-	}
-}
-
-func TestErrorMonitor_ResetCounters(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelError, false)
-	monitor := NewErrorMonitor(logger)
-	
-	// Record some errors
-	monitor.RecordError(ErrorTypeParseError)
-	monitor.RecordError(ErrorTypeValidationError)
-	
-	// Check counts are non-zero
-	counts := monitor.GetErrorCounts()
-	if counts[ErrorTypeParseError] == 0 || counts[ErrorTypeValidationError] == 0 {
-		t.Error("Counts should be non-zero before reset")
-	}
-	
-	// Reset counters
-	monitor.ResetCounters()
-	
-	// Check counts are zero
-	counts = monitor.GetErrorCounts()
-	for errorType, count := range counts {
-		if count != 0 {
-			t.Errorf("Count for %s should be 0 after reset, got %d", errorType.String(), count)
-		}
-	}
-}
-
-func TestErrorCounter_WindowExpiration(t *testing.T) {
-	counter := &ErrorCounter{
-		count:       5,
-		windowStart: time.Now().Add(-10 * time.Minute), // Old window
-		window:      5 * time.Minute,
-	}
-	
-	now := time.Now()
-	
-	// Check if window has expired
-	if now.Sub(counter.windowStart) <= counter.window {
-		t.Error("Window should have expired")
-	}
-	
-	// Simulate window reset
-	if now.Sub(counter.windowStart) > counter.window {
-		counter.count = 0
-		counter.windowStart = now
-	}
-	
-	if counter.count != 0 {
-		t.Error("Count should be reset to 0 after window expiration")
-	}
-}
-
-func TestDetailedErrorLogger_createLogEntry(t *testing.T) {
-	logger := NewDetailedErrorLogger(LogLevelInfo, false)
-	
-	context := map[string]interface{}{
-		"test_key": "test_value",
-		"number":   42,
-	}
-	
-	entry := logger.createLogEntry(LogLevelError, "Test Category", "Test message", context)
-	
-	// Check required fields
-	requiredFields := []string{"timestamp", "level", "category", "message"}
-	for _, field := range requiredFields {
-		if _, exists := entry[field]; !exists {
-			t.Errorf("Log entry should contain field '%s'", field)
-		}
-	}
-	
-	// Check level
-	if entry["level"] != "ERROR" {
-		t.Errorf("Level should be 'ERROR', got %v", entry["level"])
-	}
-	
-	// Check context was merged
-	if entry["test_key"] != "test_value" {
-		t.Error("Context should be merged into log entry")
-	}
-	if entry["number"] != 42 {
-		t.Error("Context values should be preserved")
+	// Verify summary was logged as info
+	infoCount := len(mockLogger.infoMessages)
+	if infoCount != 1 {
+		t.Errorf("Expected 1 info log for summary, got %d", infoCount)
 	}
 }

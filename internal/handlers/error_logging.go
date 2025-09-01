@@ -1,8 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -16,16 +14,25 @@ type ErrorLogger interface {
 	LogValidationError(validationErr *DetailedValidationError, req *parser.SIPMessage, context map[string]interface{})
 	LogProcessingError(err error, req *parser.SIPMessage, context map[string]interface{})
 	LogTransportError(err error, req *parser.SIPMessage, context map[string]interface{})
+	LogAuthenticationError(err error, req *parser.SIPMessage, context map[string]interface{})
+	LogSessionTimerError(err error, req *parser.SIPMessage, context map[string]interface{})
 	GetErrorStatistics() ErrorStatistics
+	GetDetailedStatistics() DetailedErrorStatistics
 	ResetStatistics()
+	SetLogLevel(level LogLevel)
+	EnableDebugMode(enable bool)
 }
 
 // DetailedErrorLogger implements comprehensive error logging
 type DetailedErrorLogger struct {
-	statistics      ErrorStatistics
-	statisticsMutex sync.RWMutex
-	logLevel        LogLevel
-	enableDebug     bool
+	statistics         ErrorStatistics
+	detailedStats      DetailedErrorStatistics
+	statisticsMutex    sync.RWMutex
+	logLevel           LogLevel
+	enableDebug        bool
+	logger             Logger
+	errorPatterns      map[string]*ErrorPattern
+	patternsMutex      sync.RWMutex
 }
 
 // LogLevel represents different logging levels
@@ -54,109 +61,369 @@ func (ll LogLevel) String() string {
 	}
 }
 
+// Logger interface for structured logging
+type Logger interface {
+	Debug(msg string, fields ...Field)
+	Info(msg string, fields ...Field)
+	Warn(msg string, fields ...Field)
+	Error(msg string, fields ...Field)
+}
+
+// Field represents a structured logging field
+type Field struct {
+	Key   string
+	Value interface{}
+}
+
+// DetailedErrorStatistics provides comprehensive error statistics
+type DetailedErrorStatistics struct {
+	ErrorStatistics
+	ParseErrorsByType     map[string]int64
+	ValidationErrorsByType map[string]int64
+	ErrorsByHour          map[int]int64
+	TopErrorMessages      []ErrorFrequency
+	RecentErrors          []RecentError
+	ErrorTrends           ErrorTrends
+}
+
+// ErrorFrequency tracks frequency of specific error messages
+type ErrorFrequency struct {
+	Message   string
+	Count     int64
+	LastSeen  time.Time
+	FirstSeen time.Time
+}
+
+// RecentError tracks recent error occurrences
+type RecentError struct {
+	Timestamp   time.Time
+	ErrorType   string
+	Message     string
+	Context     map[string]interface{}
+	Severity    LogLevel
+}
+
+// ErrorTrends tracks error trends over time
+type ErrorTrends struct {
+	Last24Hours []HourlyErrorCount
+	Last7Days   []DailyErrorCount
+	PeakHour    int
+	PeakDay     time.Weekday
+}
+
+// HourlyErrorCount tracks errors per hour
+type HourlyErrorCount struct {
+	Hour  int
+	Count int64
+}
+
+// DailyErrorCount tracks errors per day
+type DailyErrorCount struct {
+	Day   time.Time
+	Count int64
+}
+
+// ErrorPattern tracks patterns in error messages
+type ErrorPattern struct {
+	Pattern     string
+	Count       int64
+	LastSeen    time.Time
+	Examples    []string
+	Severity    LogLevel
+}
+
 // NewDetailedErrorLogger creates a new detailed error logger
-func NewDetailedErrorLogger(logLevel LogLevel, enableDebug bool) *DetailedErrorLogger {
-	return &DetailedErrorLogger{
+func NewDetailedErrorLogger(logLevel LogLevel, enableDebug bool, logger Logger) *DetailedErrorLogger {
+	del := &DetailedErrorLogger{
 		statistics: ErrorStatistics{
 			LastReset: time.Now(),
 		},
-		logLevel:    logLevel,
-		enableDebug: enableDebug,
+		detailedStats: DetailedErrorStatistics{
+			ParseErrorsByType:      make(map[string]int64),
+			ValidationErrorsByType: make(map[string]int64),
+			ErrorsByHour:          make(map[int]int64),
+			TopErrorMessages:      make([]ErrorFrequency, 0),
+			RecentErrors:          make([]RecentError, 0, 100), // Keep last 100 errors
+			ErrorTrends: ErrorTrends{
+				Last24Hours: make([]HourlyErrorCount, 24),
+				Last7Days:   make([]DailyErrorCount, 7),
+			},
+		},
+		logLevel:      logLevel,
+		enableDebug:   enableDebug,
+		logger:        logger,
+		errorPatterns: make(map[string]*ErrorPattern),
 	}
+	
+	// Initialize hourly counters
+	for i := 0; i < 24; i++ {
+		del.detailedStats.ErrorTrends.Last24Hours[i] = HourlyErrorCount{Hour: i, Count: 0}
+	}
+	
+	// Initialize daily counters
+	now := time.Now()
+	for i := 0; i < 7; i++ {
+		day := now.AddDate(0, 0, -i)
+		del.detailedStats.ErrorTrends.Last7Days[i] = DailyErrorCount{Day: day, Count: 0}
+	}
+	
+	return del
 }
 
 // LogParseError logs detailed information about parse errors
 func (del *DetailedErrorLogger) LogParseError(err error, rawMessage []byte, context map[string]interface{}) {
 	del.statisticsMutex.Lock()
 	del.statistics.ParseErrors++
+	
+	// Update detailed statistics
+	errorType := del.categorizeParseError(err)
+	del.detailedStats.ParseErrorsByType[errorType]++
+	del.updateHourlyStats()
+	del.updateErrorFrequency(err.Error())
+	del.addRecentError("parse_error", err.Error(), context, LogLevelError)
+	del.updateErrorPatterns(err.Error(), LogLevelError)
+	
 	del.statisticsMutex.Unlock()
 	
-	logEntry := del.createLogEntry(LogLevelError, "Parse Error", err.Error(), context)
-	logEntry["error_type"] = "parse_error"
-	logEntry["raw_message_length"] = len(rawMessage)
+	// Create structured log entry
+	fields := []Field{
+		{Key: "error_type", Value: "parse_error"},
+		{Key: "error_category", Value: errorType},
+		{Key: "raw_message_length", Value: len(rawMessage)},
+		{Key: "error_message", Value: err.Error()},
+	}
+	
+	// Add context fields
+	for key, value := range context {
+		fields = append(fields, Field{Key: key, Value: value})
+	}
 	
 	// Add parse-specific debug information
 	if del.enableDebug {
-		logEntry["raw_message_preview"] = del.sanitizeRawMessage(rawMessage)
-		logEntry["parse_analysis"] = del.analyzeParseError(err, rawMessage)
+		preview := del.sanitizeRawMessage(rawMessage)
+		analysis := del.analyzeParseError(err, rawMessage)
+		
+		fields = append(fields, 
+			Field{Key: "raw_message_preview", Value: preview},
+			Field{Key: "parse_analysis", Value: analysis},
+		)
+		
+		// Log detailed analysis at debug level
+		del.logger.Debug("Detailed parse error analysis", fields...)
 	}
 	
-	del.outputLog(logEntry)
+	// Log the error
+	del.logger.Error("SIP message parse error", fields...)
+	
+	// Check for error patterns that might indicate systematic issues
+	del.checkForSystematicIssues(errorType, err.Error())
 }
 
 // LogValidationError logs detailed information about validation errors
 func (del *DetailedErrorLogger) LogValidationError(validationErr *DetailedValidationError, req *parser.SIPMessage, context map[string]interface{}) {
 	del.statisticsMutex.Lock()
 	del.statistics.ValidationErrors++
+	
+	// Update detailed statistics
+	validationType := validationErr.ValidatorName
+	if validationType == "" {
+		validationType = "unknown_validator"
+	}
+	del.detailedStats.ValidationErrorsByType[validationType]++
+	del.updateHourlyStats()
+	del.updateErrorFrequency(validationErr.Error())
+	del.addRecentError("validation_error", validationErr.Error(), context, LogLevelWarn)
+	del.updateErrorPatterns(validationErr.Error(), LogLevelWarn)
+	
 	del.statisticsMutex.Unlock()
 	
-	logEntry := del.createLogEntry(LogLevelWarn, "Validation Error", validationErr.Error(), context)
-	logEntry["error_type"] = "validation_error"
-	logEntry["validator_name"] = validationErr.ValidatorName
-	logEntry["status_code"] = validationErr.Code
-	logEntry["reason"] = validationErr.Reason
+	fields := []Field{
+		{Key: "error_type", Value: "validation_error"},
+		{Key: "validator_name", Value: validationErr.ValidatorName},
+		{Key: "status_code", Value: validationErr.Code},
+		{Key: "reason", Value: validationErr.Reason},
+		{Key: "error_message", Value: validationErr.Error()},
+	}
 	
 	if len(validationErr.MissingHeaders) > 0 {
-		logEntry["missing_headers"] = validationErr.MissingHeaders
+		fields = append(fields, Field{Key: "missing_headers", Value: validationErr.MissingHeaders})
 	}
 	
 	if len(validationErr.InvalidHeaders) > 0 {
-		logEntry["invalid_headers"] = validationErr.InvalidHeaders
+		fields = append(fields, Field{Key: "invalid_headers", Value: validationErr.InvalidHeaders})
 	}
 	
 	if len(validationErr.Suggestions) > 0 {
-		logEntry["suggestions"] = validationErr.Suggestions
+		fields = append(fields, Field{Key: "suggestions", Value: validationErr.Suggestions})
 	}
 	
 	// Add request-specific information
 	if req != nil {
-		logEntry["sip_method"] = req.GetMethod()
-		logEntry["request_uri"] = req.GetRequestURI()
-		logEntry["call_id"] = req.GetHeader(parser.HeaderCallID)
-		logEntry["from"] = req.GetHeader(parser.HeaderFrom)
-		logEntry["to"] = req.GetHeader(parser.HeaderTo)
+		fields = append(fields,
+			Field{Key: "sip_method", Value: req.GetMethod()},
+			Field{Key: "request_uri", Value: req.GetRequestURI()},
+			Field{Key: "call_id", Value: req.GetHeader("Call-ID")},
+			Field{Key: "from", Value: req.GetHeader("From")},
+			Field{Key: "to", Value: req.GetHeader("To")},
+		)
 		
 		if del.enableDebug {
-			logEntry["all_headers"] = del.sanitizeHeaders(req)
+			sanitizedHeaders := del.sanitizeHeaders(req)
+			fields = append(fields, Field{Key: "all_headers", Value: sanitizedHeaders})
 		}
 	}
 	
-	del.outputLog(logEntry)
+	// Add context fields
+	for key, value := range context {
+		fields = append(fields, Field{Key: key, Value: value})
+	}
+	
+	del.logger.Warn("SIP validation error", fields...)
 }
 
 // LogProcessingError logs detailed information about processing errors
 func (del *DetailedErrorLogger) LogProcessingError(err error, req *parser.SIPMessage, context map[string]interface{}) {
 	del.statisticsMutex.Lock()
 	del.statistics.ProcessingErrors++
+	del.updateHourlyStats()
+	del.updateErrorFrequency(err.Error())
+	del.addRecentError("processing_error", err.Error(), context, LogLevelError)
+	del.updateErrorPatterns(err.Error(), LogLevelError)
 	del.statisticsMutex.Unlock()
 	
-	logEntry := del.createLogEntry(LogLevelError, "Processing Error", err.Error(), context)
-	logEntry["error_type"] = "processing_error"
-	
-	if req != nil {
-		logEntry["sip_method"] = req.GetMethod()
-		logEntry["request_uri"] = req.GetRequestURI()
-		logEntry["call_id"] = req.GetHeader(parser.HeaderCallID)
+	fields := []Field{
+		{Key: "error_type", Value: "processing_error"},
+		{Key: "error_message", Value: err.Error()},
 	}
 	
-	del.outputLog(logEntry)
+	if req != nil {
+		fields = append(fields,
+			Field{Key: "sip_method", Value: req.GetMethod()},
+			Field{Key: "request_uri", Value: req.GetRequestURI()},
+			Field{Key: "call_id", Value: req.GetHeader("Call-ID")},
+		)
+	}
+	
+	// Add context fields
+	for key, value := range context {
+		fields = append(fields, Field{Key: key, Value: value})
+	}
+	
+	del.logger.Error("SIP processing error", fields...)
 }
 
 // LogTransportError logs detailed information about transport errors
 func (del *DetailedErrorLogger) LogTransportError(err error, req *parser.SIPMessage, context map[string]interface{}) {
 	del.statisticsMutex.Lock()
 	del.statistics.TransportErrors++
+	del.updateHourlyStats()
+	del.updateErrorFrequency(err.Error())
+	del.addRecentError("transport_error", err.Error(), context, LogLevelError)
 	del.statisticsMutex.Unlock()
 	
-	logEntry := del.createLogEntry(LogLevelError, "Transport Error", err.Error(), context)
-	logEntry["error_type"] = "transport_error"
-	
-	if req != nil {
-		logEntry["sip_method"] = req.GetMethod()
-		logEntry["call_id"] = req.GetHeader(parser.HeaderCallID)
+	fields := []Field{
+		{Key: "error_type", Value: "transport_error"},
+		{Key: "error_message", Value: err.Error()},
 	}
 	
-	del.outputLog(logEntry)
+	if req != nil {
+		fields = append(fields,
+			Field{Key: "sip_method", Value: req.GetMethod()},
+			Field{Key: "call_id", Value: req.GetHeader("Call-ID")},
+		)
+	}
+	
+	// Add context fields
+	for key, value := range context {
+		fields = append(fields, Field{Key: key, Value: value})
+	}
+	
+	del.logger.Error("SIP transport error", fields...)
+}
+
+// LogAuthenticationError logs detailed information about authentication errors
+func (del *DetailedErrorLogger) LogAuthenticationError(err error, req *parser.SIPMessage, context map[string]interface{}) {
+	del.statisticsMutex.Lock()
+	del.statistics.AuthErrors++
+	del.updateHourlyStats()
+	del.updateErrorFrequency(err.Error())
+	del.addRecentError("authentication_error", err.Error(), context, LogLevelWarn)
+	del.statisticsMutex.Unlock()
+	
+	fields := []Field{
+		{Key: "error_type", Value: "authentication_error"},
+		{Key: "error_message", Value: err.Error()},
+	}
+	
+	if req != nil {
+		fields = append(fields,
+			Field{Key: "sip_method", Value: req.GetMethod()},
+			Field{Key: "call_id", Value: req.GetHeader("Call-ID")},
+			Field{Key: "from", Value: req.GetHeader("From")},
+		)
+		
+		// Add authentication-specific debug info
+		if del.enableDebug {
+			authHeader := req.GetHeader("Authorization")
+			if authHeader != "" {
+				fields = append(fields, Field{Key: "auth_header_present", Value: true})
+				// Don't log the actual auth header for security
+			} else {
+				fields = append(fields, Field{Key: "auth_header_present", Value: false})
+			}
+		}
+	}
+	
+	// Add context fields
+	for key, value := range context {
+		fields = append(fields, Field{Key: key, Value: value})
+	}
+	
+	del.logger.Warn("SIP authentication error", fields...)
+}
+
+// LogSessionTimerError logs detailed information about session timer errors
+func (del *DetailedErrorLogger) LogSessionTimerError(err error, req *parser.SIPMessage, context map[string]interface{}) {
+	del.statisticsMutex.Lock()
+	del.statistics.SessionTimerErrors++
+	del.updateHourlyStats()
+	del.updateErrorFrequency(err.Error())
+	del.addRecentError("session_timer_error", err.Error(), context, LogLevelWarn)
+	del.statisticsMutex.Unlock()
+	
+	fields := []Field{
+		{Key: "error_type", Value: "session_timer_error"},
+		{Key: "error_message", Value: err.Error()},
+	}
+	
+	if req != nil {
+		fields = append(fields,
+			Field{Key: "sip_method", Value: req.GetMethod()},
+			Field{Key: "call_id", Value: req.GetHeader("Call-ID")},
+		)
+		
+		// Add session timer specific debug info
+		if del.enableDebug {
+			sessionExpires := req.GetHeader("Session-Expires")
+			minSE := req.GetHeader("Min-SE")
+			supported := req.GetHeader("Supported")
+			require := req.GetHeader("Require")
+			
+			fields = append(fields,
+				Field{Key: "session_expires", Value: sessionExpires},
+				Field{Key: "min_se", Value: minSE},
+				Field{Key: "supported", Value: supported},
+				Field{Key: "require", Value: require},
+			)
+		}
+	}
+	
+	// Add context fields
+	for key, value := range context {
+		fields = append(fields, Field{Key: key, Value: value})
+	}
+	
+	del.logger.Warn("SIP session timer error", fields...)
 }
 
 // GetErrorStatistics returns current error statistics
@@ -175,6 +442,47 @@ func (del *DetailedErrorLogger) GetErrorStatistics() ErrorStatistics {
 	}
 }
 
+// GetDetailedStatistics returns comprehensive error statistics
+func (del *DetailedErrorLogger) GetDetailedStatistics() DetailedErrorStatistics {
+	del.statisticsMutex.RLock()
+	defer del.statisticsMutex.RUnlock()
+	
+	// Create a deep copy to avoid race conditions
+	stats := DetailedErrorStatistics{
+		ErrorStatistics: del.statistics,
+		ParseErrorsByType: make(map[string]int64),
+		ValidationErrorsByType: make(map[string]int64),
+		ErrorsByHour: make(map[int]int64),
+		TopErrorMessages: make([]ErrorFrequency, len(del.detailedStats.TopErrorMessages)),
+		RecentErrors: make([]RecentError, len(del.detailedStats.RecentErrors)),
+		ErrorTrends: ErrorTrends{
+			Last24Hours: make([]HourlyErrorCount, len(del.detailedStats.ErrorTrends.Last24Hours)),
+			Last7Days: make([]DailyErrorCount, len(del.detailedStats.ErrorTrends.Last7Days)),
+			PeakHour: del.detailedStats.ErrorTrends.PeakHour,
+			PeakDay: del.detailedStats.ErrorTrends.PeakDay,
+		},
+	}
+	
+	// Copy maps
+	for k, v := range del.detailedStats.ParseErrorsByType {
+		stats.ParseErrorsByType[k] = v
+	}
+	for k, v := range del.detailedStats.ValidationErrorsByType {
+		stats.ValidationErrorsByType[k] = v
+	}
+	for k, v := range del.detailedStats.ErrorsByHour {
+		stats.ErrorsByHour[k] = v
+	}
+	
+	// Copy slices
+	copy(stats.TopErrorMessages, del.detailedStats.TopErrorMessages)
+	copy(stats.RecentErrors, del.detailedStats.RecentErrors)
+	copy(stats.ErrorTrends.Last24Hours, del.detailedStats.ErrorTrends.Last24Hours)
+	copy(stats.ErrorTrends.Last7Days, del.detailedStats.ErrorTrends.Last7Days)
+	
+	return stats
+}
+
 // ResetStatistics resets error statistics
 func (del *DetailedErrorLogger) ResetStatistics() {
 	del.statisticsMutex.Lock()
@@ -183,39 +491,48 @@ func (del *DetailedErrorLogger) ResetStatistics() {
 	del.statistics = ErrorStatistics{
 		LastReset: time.Now(),
 	}
+	
+	// Reset detailed statistics
+	del.detailedStats = DetailedErrorStatistics{
+		ParseErrorsByType:      make(map[string]int64),
+		ValidationErrorsByType: make(map[string]int64),
+		ErrorsByHour:          make(map[int]int64),
+		TopErrorMessages:      make([]ErrorFrequency, 0),
+		RecentErrors:          make([]RecentError, 0, 100),
+		ErrorTrends: ErrorTrends{
+			Last24Hours: make([]HourlyErrorCount, 24),
+			Last7Days:   make([]DailyErrorCount, 7),
+		},
+	}
+	
+	// Reinitialize hourly and daily counters
+	for i := 0; i < 24; i++ {
+		del.detailedStats.ErrorTrends.Last24Hours[i] = HourlyErrorCount{Hour: i, Count: 0}
+	}
+	
+	now := time.Now()
+	for i := 0; i < 7; i++ {
+		day := now.AddDate(0, 0, -i)
+		del.detailedStats.ErrorTrends.Last7Days[i] = DailyErrorCount{Day: day, Count: 0}
+	}
+	
+	// Reset error patterns
+	del.patternsMutex.Lock()
+	del.errorPatterns = make(map[string]*ErrorPattern)
+	del.patternsMutex.Unlock()
 }
 
-// createLogEntry creates a base log entry with common fields
-func (del *DetailedErrorLogger) createLogEntry(level LogLevel, category, message string, context map[string]interface{}) map[string]interface{} {
-	entry := map[string]interface{}{
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
-		"level":     level.String(),
-		"category":  category,
-		"message":   message,
-	}
-	
-	// Add context information
-	if context != nil {
-		for key, value := range context {
-			entry[key] = value
-		}
-	}
-	
-	return entry
+// SetLogLevel changes the logging level
+func (del *DetailedErrorLogger) SetLogLevel(level LogLevel) {
+	del.logLevel = level
 }
 
-// outputLog outputs the log entry (in production, this would use a proper logger)
-func (del *DetailedErrorLogger) outputLog(entry map[string]interface{}) {
-	// Convert to JSON for structured logging
-	jsonBytes, err := json.Marshal(entry)
-	if err != nil {
-		fmt.Printf("ERROR: Failed to marshal log entry: %v\n", err)
-		return
-	}
-	
-	// In production, this would use a proper logging framework
-	fmt.Printf("%s\n", string(jsonBytes))
+// EnableDebugMode enables or disables debug mode
+func (del *DetailedErrorLogger) EnableDebugMode(enable bool) {
+	del.enableDebug = enable
 }
+
+
 
 // sanitizeRawMessage creates a safe preview of raw message for logging
 func (del *DetailedErrorLogger) sanitizeRawMessage(rawMessage []byte) string {
@@ -243,20 +560,20 @@ func (del *DetailedErrorLogger) sanitizeHeaders(req *parser.SIPMessage) map[stri
 	
 	// List of headers to include in debug logs
 	debugHeaders := []string{
-		parser.HeaderVia,
-		parser.HeaderFrom,
-		parser.HeaderTo,
-		parser.HeaderCallID,
-		parser.HeaderCSeq,
-		parser.HeaderContentType,
-		parser.HeaderContentLength,
-		parser.HeaderSessionExpires,
-		parser.HeaderMinSE,
-		parser.HeaderSupported,
-		parser.HeaderRequire,
-		parser.HeaderAllow,
-		parser.HeaderContact,
-		parser.HeaderExpires,
+		"Via",
+		"From",
+		"To",
+		"Call-ID",
+		"CSeq",
+		"Content-Type",
+		"Content-Length",
+		"Session-Expires",
+		"Min-SE",
+		"Supported",
+		"Require",
+		"Allow",
+		"Contact",
+		"Expires",
 	}
 	
 	for _, header := range debugHeaders {
@@ -465,4 +782,256 @@ func (em *ErrorMonitor) ResetCounters() {
 		counter.count = 0
 		counter.windowStart = now
 	}
+}
+
+// categorizeParseError categorizes parse errors for better tracking
+func (del *DetailedErrorLogger) categorizeParseError(err error) string {
+	errorMsg := strings.ToLower(err.Error())
+	
+	switch {
+	case strings.Contains(errorMsg, "start line") || strings.Contains(errorMsg, "request line") || strings.Contains(errorMsg, "status line"):
+		return "start_line_error"
+	case strings.Contains(errorMsg, "header"):
+		return "header_error"
+	case strings.Contains(errorMsg, "content-length"):
+		return "content_length_error"
+	case strings.Contains(errorMsg, "body"):
+		return "body_error"
+	case strings.Contains(errorMsg, "empty"):
+		return "empty_message_error"
+	case strings.Contains(errorMsg, "method"):
+		return "invalid_method_error"
+	case strings.Contains(errorMsg, "version"):
+		return "version_error"
+	default:
+		return "unknown_parse_error"
+	}
+}
+
+// updateHourlyStats updates hourly error statistics
+func (del *DetailedErrorLogger) updateHourlyStats() {
+	hour := time.Now().Hour()
+	del.detailedStats.ErrorsByHour[hour]++
+	
+	// Update hourly trends
+	for i := range del.detailedStats.ErrorTrends.Last24Hours {
+		if del.detailedStats.ErrorTrends.Last24Hours[i].Hour == hour {
+			del.detailedStats.ErrorTrends.Last24Hours[i].Count++
+			break
+		}
+	}
+	
+	// Update peak hour
+	if del.detailedStats.ErrorsByHour[hour] > del.detailedStats.ErrorsByHour[del.detailedStats.ErrorTrends.PeakHour] {
+		del.detailedStats.ErrorTrends.PeakHour = hour
+	}
+	
+	// Update daily trends
+	today := time.Now().Truncate(24 * time.Hour)
+	for i := range del.detailedStats.ErrorTrends.Last7Days {
+		if del.detailedStats.ErrorTrends.Last7Days[i].Day.Equal(today) {
+			del.detailedStats.ErrorTrends.Last7Days[i].Count++
+			break
+		}
+	}
+}
+
+// updateErrorFrequency updates the frequency tracking for error messages
+func (del *DetailedErrorLogger) updateErrorFrequency(errorMsg string) {
+	// Find existing error frequency entry
+	for i := range del.detailedStats.TopErrorMessages {
+		if del.detailedStats.TopErrorMessages[i].Message == errorMsg {
+			del.detailedStats.TopErrorMessages[i].Count++
+			del.detailedStats.TopErrorMessages[i].LastSeen = time.Now()
+			return
+		}
+	}
+	
+	// Add new error frequency entry
+	newEntry := ErrorFrequency{
+		Message:   errorMsg,
+		Count:     1,
+		LastSeen:  time.Now(),
+		FirstSeen: time.Now(),
+	}
+	
+	del.detailedStats.TopErrorMessages = append(del.detailedStats.TopErrorMessages, newEntry)
+	
+	// Keep only top 50 error messages, sorted by frequency
+	if len(del.detailedStats.TopErrorMessages) > 50 {
+		// Simple sort by count (in production, use proper sorting)
+		maxCount := int64(0)
+		maxIndex := 0
+		for i, entry := range del.detailedStats.TopErrorMessages {
+			if entry.Count > maxCount {
+				maxCount = entry.Count
+				maxIndex = i
+			}
+		}
+		
+		// Keep the most frequent errors (simplified approach)
+		if maxIndex < len(del.detailedStats.TopErrorMessages)-1 {
+			del.detailedStats.TopErrorMessages = del.detailedStats.TopErrorMessages[:50]
+		}
+	}
+}
+
+// addRecentError adds an error to the recent errors list
+func (del *DetailedErrorLogger) addRecentError(errorType, message string, context map[string]interface{}, severity LogLevel) {
+	recentError := RecentError{
+		Timestamp: time.Now(),
+		ErrorType: errorType,
+		Message:   message,
+		Context:   context,
+		Severity:  severity,
+	}
+	
+	del.detailedStats.RecentErrors = append(del.detailedStats.RecentErrors, recentError)
+	
+	// Keep only last 100 errors
+	if len(del.detailedStats.RecentErrors) > 100 {
+		del.detailedStats.RecentErrors = del.detailedStats.RecentErrors[1:]
+	}
+}
+
+// updateErrorPatterns tracks patterns in error messages
+func (del *DetailedErrorLogger) updateErrorPatterns(errorMsg string, severity LogLevel) {
+	del.patternsMutex.Lock()
+	defer del.patternsMutex.Unlock()
+	
+	// Extract pattern from error message (simplified approach)
+	pattern := del.extractErrorPattern(errorMsg)
+	
+	if existing, exists := del.errorPatterns[pattern]; exists {
+		existing.Count++
+		existing.LastSeen = time.Now()
+		
+		// Add example if we don't have too many
+		if len(existing.Examples) < 5 {
+			existing.Examples = append(existing.Examples, errorMsg)
+		}
+	} else {
+		del.errorPatterns[pattern] = &ErrorPattern{
+			Pattern:  pattern,
+			Count:    1,
+			LastSeen: time.Now(),
+			Examples: []string{errorMsg},
+			Severity: severity,
+		}
+	}
+}
+
+// extractErrorPattern extracts a pattern from an error message
+func (del *DetailedErrorLogger) extractErrorPattern(errorMsg string) string {
+	// Simplified pattern extraction - replace specific values with placeholders
+	pattern := errorMsg
+	
+	// Replace numbers with placeholder
+	pattern = strings.ReplaceAll(pattern, "0", "N")
+	pattern = strings.ReplaceAll(pattern, "1", "N")
+	pattern = strings.ReplaceAll(pattern, "2", "N")
+	pattern = strings.ReplaceAll(pattern, "3", "N")
+	pattern = strings.ReplaceAll(pattern, "4", "N")
+	pattern = strings.ReplaceAll(pattern, "5", "N")
+	pattern = strings.ReplaceAll(pattern, "6", "N")
+	pattern = strings.ReplaceAll(pattern, "7", "N")
+	pattern = strings.ReplaceAll(pattern, "8", "N")
+	pattern = strings.ReplaceAll(pattern, "9", "N")
+	
+	// Replace common SIP URIs with placeholder
+	if strings.Contains(pattern, "sip:") {
+		pattern = strings.ReplaceAll(pattern, "sip:", "sip:USER@DOMAIN")
+	}
+	
+	// Replace IP addresses with placeholder
+	if strings.Contains(pattern, ".") && (strings.Contains(pattern, "192.") || strings.Contains(pattern, "10.") || strings.Contains(pattern, "172.")) {
+		pattern = strings.ReplaceAll(pattern, "192.", "IP.")
+		pattern = strings.ReplaceAll(pattern, "10.", "IP.")
+		pattern = strings.ReplaceAll(pattern, "172.", "IP.")
+	}
+	
+	return pattern
+}
+
+// checkForSystematicIssues checks if error patterns indicate systematic problems
+func (del *DetailedErrorLogger) checkForSystematicIssues(errorType, errorMsg string) {
+	// Check if we're seeing too many of the same type of error
+	del.patternsMutex.RLock()
+	pattern := del.extractErrorPattern(errorMsg)
+	if errorPattern, exists := del.errorPatterns[pattern]; exists {
+		if errorPattern.Count > 10 { // Threshold for systematic issue
+			del.patternsMutex.RUnlock()
+			
+			// Log a warning about potential systematic issue
+			del.logger.Warn("Potential systematic error pattern detected",
+				Field{Key: "error_pattern", Value: pattern},
+				Field{Key: "occurrence_count", Value: errorPattern.Count},
+				Field{Key: "error_type", Value: errorType},
+				Field{Key: "last_seen", Value: errorPattern.LastSeen},
+			)
+			return
+		}
+	}
+	del.patternsMutex.RUnlock()
+	
+	// Check for high error rates in recent time windows
+	del.statisticsMutex.RLock()
+	currentHour := time.Now().Hour()
+	currentHourErrors := del.detailedStats.ErrorsByHour[currentHour]
+	del.statisticsMutex.RUnlock()
+	
+	if currentHourErrors > 100 { // Threshold for high error rate
+		del.logger.Warn("High error rate detected",
+			Field{Key: "hour", Value: currentHour},
+			Field{Key: "error_count", Value: currentHourErrors},
+			Field{Key: "error_type", Value: errorType},
+		)
+	}
+}
+
+// GetErrorPatterns returns current error patterns (for monitoring/debugging)
+func (del *DetailedErrorLogger) GetErrorPatterns() map[string]*ErrorPattern {
+	del.patternsMutex.RLock()
+	defer del.patternsMutex.RUnlock()
+	
+	patterns := make(map[string]*ErrorPattern)
+	for k, v := range del.errorPatterns {
+		// Create a copy to avoid race conditions
+		patterns[k] = &ErrorPattern{
+			Pattern:  v.Pattern,
+			Count:    v.Count,
+			LastSeen: v.LastSeen,
+			Examples: append([]string(nil), v.Examples...),
+			Severity: v.Severity,
+		}
+	}
+	
+	return patterns
+}
+
+// LogErrorSummary logs a periodic summary of error statistics
+func (del *DetailedErrorLogger) LogErrorSummary() {
+	stats := del.GetDetailedStatistics()
+	
+	fields := []Field{
+		{Key: "parse_errors", Value: stats.ParseErrors},
+		{Key: "validation_errors", Value: stats.ValidationErrors},
+		{Key: "processing_errors", Value: stats.ProcessingErrors},
+		{Key: "transport_errors", Value: stats.TransportErrors},
+		{Key: "auth_errors", Value: stats.AuthErrors},
+		{Key: "session_timer_errors", Value: stats.SessionTimerErrors},
+		{Key: "peak_hour", Value: stats.ErrorTrends.PeakHour},
+		{Key: "total_error_patterns", Value: len(del.errorPatterns)},
+	}
+	
+	// Add top error types
+	if len(stats.ParseErrorsByType) > 0 {
+		fields = append(fields, Field{Key: "parse_error_types", Value: stats.ParseErrorsByType})
+	}
+	
+	if len(stats.ValidationErrorsByType) > 0 {
+		fields = append(fields, Field{Key: "validation_error_types", Value: stats.ValidationErrorsByType})
+	}
+	
+	del.logger.Info("Error statistics summary", fields...)
 }

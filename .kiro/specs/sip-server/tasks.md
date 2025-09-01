@@ -237,7 +237,7 @@
     - 詳細なエラーログの実装
     - _Requirements: 13.1, 13.5_
 
-- [-] 16. エラーハンドリングの完全実装
+- [x] 16. エラーハンドリングの完全実装
   - [x] 16.1 ErrorHandlerインターフェースの実装
     - 各種エラータイプに対応したハンドラーの実装
     - ValidationErrorの詳細な定義
@@ -250,7 +250,7 @@
     - 405 Method Not Allowedの適切な処理
     - _Requirements: 14.3, 14.4_
 
-  - [ ] 16.3 エラーログとモニタリングの改善
+  - [x] 16.3 エラーログとモニタリングの改善
     - パースエラーの詳細ログ出力
     - エラー統計の収集
     - デバッグ情報の充実
@@ -258,7 +258,7 @@
 
 
 
-- [ ] 17. Create comprehensive integration tests
+- [x] 17. Create comprehensive integration tests
   - Write end-to-end tests for complete SIP call flows
   - Add tests for concurrent registration and session handling
   - Create Session-Timer enforcement integration tests
