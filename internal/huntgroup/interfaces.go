@@ -102,12 +102,16 @@ type HuntGroupManager interface {
 	UpdateGroup(group *HuntGroup) error
 	DeleteGroup(id int) error
 	ListGroups() ([]*HuntGroup, error)
+	EnableGroup(groupID int) error
+	DisableGroup(groupID int) error
 
 	// Member management
 	AddMember(groupID int, member *HuntGroupMember) error
 	RemoveMember(groupID int, memberID int) error
 	UpdateMember(member *HuntGroupMember) error
 	GetGroupMembers(groupID int) ([]*HuntGroupMember, error)
+	EnableMember(groupID int, memberID int) error
+	DisableMember(groupID int, memberID int) error
 
 	// Call session management
 	CreateSession(session *CallSession) error

@@ -98,7 +98,10 @@ func (m *MockUserManager) GetUser(username, realm string) (*database.User, error
 
 func TestNewServer(t *testing.T) {
 	userManager := NewMockUserManager()
-	server := NewServer(userManager)
+	huntGroupManager := NewSimpleHuntGroupManager()
+	huntGroupEngine := &SimpleHuntGroupEngine{}
+	logger := &SimpleLogger{}
+	server := NewServer(userManager, huntGroupManager, huntGroupEngine, logger)
 	
 	if server == nil {
 		t.Fatal("NewServer returned nil")
@@ -111,10 +114,13 @@ func TestNewServer(t *testing.T) {
 
 func TestServer_RegisterRoutes(t *testing.T) {
 	userManager := NewMockUserManager()
-	server := NewServer(userManager)
+	huntGroupManager := NewSimpleHuntGroupManager()
+	huntGroupEngine := &SimpleHuntGroupEngine{}
+	logger := &SimpleLogger{}
+	server := NewServer(userManager, huntGroupManager, huntGroupEngine, logger)
 	
 	mux := http.NewServeMux()
-	server.RegisterRoutes(mux)
+	server.RegisterRoutes()
 	
 	// Test that routes are registered by checking for 404 vs other errors
 	testCases := []struct {
@@ -140,7 +146,10 @@ func TestServer_RegisterRoutes(t *testing.T) {
 
 func TestServer_handleListUsers(t *testing.T) {
 	userManager := NewMockUserManager()
-	server := NewServer(userManager)
+	huntGroupManager := NewSimpleHuntGroupManager()
+	huntGroupEngine := &SimpleHuntGroupEngine{}
+	logger := &SimpleLogger{}
+	server := NewServer(userManager, huntGroupManager, huntGroupEngine, logger)
 	
 	// Add test users
 	userManager.CreateUser("alice", "example.com", "password123")
@@ -149,7 +158,7 @@ func TestServer_handleListUsers(t *testing.T) {
 	req := httptest.NewRequest("GET", "/admin/users", nil)
 	w := httptest.NewRecorder()
 	
-	server.handleListUsers(w, req)
+	server.userHandler.handleListUsers(w, req)
 	
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
@@ -167,7 +176,10 @@ func TestServer_handleListUsers(t *testing.T) {
 
 func TestServer_handleCreateUser(t *testing.T) {
 	userManager := NewMockUserManager()
-	server := NewServer(userManager)
+	huntGroupManager := NewSimpleHuntGroupManager()
+	huntGroupEngine := &SimpleHuntGroupEngine{}
+	logger := &SimpleLogger{}
+	server := NewServer(userManager, huntGroupManager, huntGroupEngine, logger)
 	
 	// Test successful user creation
 	form := url.Values{}
@@ -179,7 +191,7 @@ func TestServer_handleCreateUser(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	
 	w := httptest.NewRecorder()
-	server.handleCreateUser(w, req)
+	server.userHandler.handleCreateUser(w, req)
 	
 	if w.Code != http.StatusSeeOther && w.Code != http.StatusOK {
 		t.Errorf("Expected status 200 or 303, got %d: %s", w.Code, w.Body.String())
@@ -198,7 +210,10 @@ func TestServer_handleCreateUser(t *testing.T) {
 
 func TestServer_handleCreateUser_ValidationErrors(t *testing.T) {
 	userManager := NewMockUserManager()
-	server := NewServer(userManager)
+	huntGroupManager := NewSimpleHuntGroupManager()
+	huntGroupEngine := &SimpleHuntGroupEngine{}
+	logger := &SimpleLogger{}
+	server := NewServer(userManager, huntGroupManager, huntGroupEngine, logger)
 	
 	testCases := []struct {
 		name     string
@@ -224,7 +239,7 @@ func TestServer_handleCreateUser_ValidationErrors(t *testing.T) {
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			
 			w := httptest.NewRecorder()
-			server.handleCreateUser(w, req)
+			server.userHandler.handleCreateUser(w, req)
 			
 			if w.Code != tc.expectStatus {
 				t.Errorf("Expected status %d, got %d", tc.expectStatus, w.Code)
@@ -235,7 +250,10 @@ func TestServer_handleCreateUser_ValidationErrors(t *testing.T) {
 
 func TestServer_handleUpdateUser(t *testing.T) {
 	userManager := NewMockUserManager()
-	server := NewServer(userManager)
+	huntGroupManager := NewSimpleHuntGroupManager()
+	huntGroupEngine := &SimpleHuntGroupEngine{}
+	logger := &SimpleLogger{}
+	server := NewServer(userManager, huntGroupManager, huntGroupEngine, logger)
 	
 	// Create a test user first
 	userManager.CreateUser("testuser", "example.com", "oldpassword")
@@ -250,7 +268,7 @@ func TestServer_handleUpdateUser(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	
 	w := httptest.NewRecorder()
-	server.handleUpdateUser(w, req, 1)
+	server.userHandler.handleUpdateUser(w, req)
 	
 	if w.Code != http.StatusSeeOther && w.Code != http.StatusOK {
 		t.Errorf("Expected status 200 or 303, got %d: %s", w.Code, w.Body.String())
@@ -267,7 +285,10 @@ func TestServer_handleUpdateUser(t *testing.T) {
 
 func TestServer_handleDeleteUser(t *testing.T) {
 	userManager := NewMockUserManager()
-	server := NewServer(userManager)
+	huntGroupManager := NewSimpleHuntGroupManager()
+	huntGroupEngine := &SimpleHuntGroupEngine{}
+	logger := &SimpleLogger{}
+	server := NewServer(userManager, huntGroupManager, huntGroupEngine, logger)
 	
 	// Create a test user first
 	userManager.CreateUser("testuser", "example.com", "password")
@@ -276,7 +297,7 @@ func TestServer_handleDeleteUser(t *testing.T) {
 	req := httptest.NewRequest("DELETE", "/admin/users/1?username=testuser&realm=example.com", nil)
 	
 	w := httptest.NewRecorder()
-	server.handleDeleteUser(w, req, 1)
+	server.userHandler.handleDeleteUser(w, req)
 	
 	if w.Code != http.StatusSeeOther && w.Code != http.StatusOK {
 		t.Errorf("Expected status 200 or 303, got %d: %s", w.Code, w.Body.String())
@@ -291,13 +312,16 @@ func TestServer_handleDeleteUser(t *testing.T) {
 
 func TestServer_handleUserByID(t *testing.T) {
 	userManager := NewMockUserManager()
-	server := NewServer(userManager)
+	huntGroupManager := NewSimpleHuntGroupManager()
+	huntGroupEngine := &SimpleHuntGroupEngine{}
+	logger := &SimpleLogger{}
+	server := NewServer(userManager, huntGroupManager, huntGroupEngine, logger)
 	
 	// Test invalid user ID
 	req := httptest.NewRequest("PUT", "/admin/users/invalid", nil)
 	w := httptest.NewRecorder()
 	
-	server.handleUserByID(w, req)
+	server.userHandler.HandleUserByID(w, req)
 	
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("Expected status 400 for invalid ID, got %d", w.Code)
@@ -307,7 +331,7 @@ func TestServer_handleUserByID(t *testing.T) {
 	req = httptest.NewRequest("GET", "/admin/users/1", nil)
 	w = httptest.NewRecorder()
 	
-	server.handleUserByID(w, req)
+	server.userHandler.HandleUserByID(w, req)
 	
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("Expected status 405 for unsupported method, got %d", w.Code)
@@ -316,13 +340,16 @@ func TestServer_handleUserByID(t *testing.T) {
 
 func TestServer_handleUsers_MethodNotAllowed(t *testing.T) {
 	userManager := NewMockUserManager()
-	server := NewServer(userManager)
+	huntGroupManager := NewSimpleHuntGroupManager()
+	huntGroupEngine := &SimpleHuntGroupEngine{}
+	logger := &SimpleLogger{}
+	server := NewServer(userManager, huntGroupManager, huntGroupEngine, logger)
 	
 	// Test unsupported method
 	req := httptest.NewRequest("DELETE", "/admin/users", nil)
 	w := httptest.NewRecorder()
 	
-	server.handleUsers(w, req)
+	server.userHandler.HandleUsers(w, req)
 	
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("Expected status 405, got %d", w.Code)

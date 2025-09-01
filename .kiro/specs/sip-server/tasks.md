@@ -326,30 +326,30 @@
 
 
 
-- [ ] 19. Implement Hunt Group database models and storage
-  - [ ] 19.1 Create Hunt Group database schema
+- [x] 19. Implement Hunt Group database models and storage
+  - [x] 19.1 Create Hunt Group database schema
     - Design hunt_groups table with extension, members, strategy, and timeout fields
     - Create hunt_group_calls table for call tracking and statistics
     - Implement database migration for new tables
     - Write unit tests for schema creation and validation
     - _Requirements: 15.1, 17.1_
 
-  - [ ] 19.2 Implement Hunt Group data models
+  - [x] 19.2 Implement Hunt Group data models
     - Create HuntGroup and HuntGroupMember Go structs with JSON serialization
     - Implement validation methods for hunt group configuration
     - Add database CRUD operations for hunt groups
     - Write unit tests for data model operations
     - _Requirements: 15.1, 17.2_
 
-- [ ] 20. Implement Hunt Group management service
-  - [ ] 20.1 Create Hunt Group manager interface and implementation
+- [x] 20. Implement Hunt Group management service
+  - [x] 20.1 Create Hunt Group manager interface and implementation
     - Implement HuntGroupManager interface with CRUD operations
     - Add hunt group lookup by extension functionality
     - Create hunt group member management (add, remove, enable/disable)
     - Write unit tests for hunt group management operations
     - _Requirements: 15.1, 17.2, 17.3_
 
-  - [ ] 20.2 Implement Hunt Group web interface
+  - [x] 20.2 Implement Hunt Group web interface
     - Create HTML templates for hunt group management pages
     - Add REST API endpoints for hunt group operations
     - Implement web forms for creating and editing hunt groups

@@ -1,516 +1,611 @@
 package huntgroup
 
 import (
-	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/zurustar/xylitol2/internal/database"
-	"github.com/zurustar/xylitol2/internal/logging"
 )
 
-// Manager implements the HuntGroupManager interface
-type Manager struct {
-	db     database.DatabaseManager
-	logger logging.Logger
+// DatabaseManager implements the HuntGroupManager interface using a database backend
+type DatabaseManager struct {
+	db database.DatabaseManager
 }
 
-// NewManager creates a new hunt group manager
-func NewManager(db database.DatabaseManager, logger logging.Logger) *Manager {
-	return &Manager{
-		db:     db,
-		logger: logger,
+// NewDatabaseManager creates a new hunt group database manager
+func NewDatabaseManager(db database.DatabaseManager) HuntGroupManager {
+	return &DatabaseManager{
+		db: db,
 	}
-}
-
-// InitializeTables creates the necessary database tables for hunt groups
-func (m *Manager) InitializeTables() error {
-	queries := []string{
-		`CREATE TABLE IF NOT EXISTS hunt_groups (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL UNIQUE,
-			extension TEXT NOT NULL UNIQUE,
-			strategy TEXT NOT NULL DEFAULT 'simultaneous',
-			ring_timeout INTEGER NOT NULL DEFAULT 30,
-			enabled BOOLEAN NOT NULL DEFAULT 1,
-			description TEXT,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS hunt_group_members (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			group_id INTEGER NOT NULL,
-			extension TEXT NOT NULL,
-			priority INTEGER NOT NULL DEFAULT 0,
-			enabled BOOLEAN NOT NULL DEFAULT 1,
-			timeout INTEGER,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (group_id) REFERENCES hunt_groups(id) ON DELETE CASCADE,
-			UNIQUE(group_id, extension)
-		)`,
-		`CREATE TABLE IF NOT EXISTS hunt_group_call_logs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			group_id INTEGER NOT NULL,
-			session_id TEXT NOT NULL,
-			caller_uri TEXT NOT NULL,
-			answered_by TEXT,
-			start_time DATETIME NOT NULL,
-			answer_time DATETIME,
-			end_time DATETIME,
-			status TEXT NOT NULL,
-			ring_duration INTEGER,
-			call_duration INTEGER,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (group_id) REFERENCES hunt_groups(id) ON DELETE CASCADE
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_hunt_groups_extension ON hunt_groups(extension)`,
-		`CREATE INDEX IF NOT EXISTS idx_hunt_group_members_group_id ON hunt_group_members(group_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_hunt_group_members_priority ON hunt_group_members(group_id, priority)`,
-		`CREATE INDEX IF NOT EXISTS idx_hunt_group_call_logs_group_id ON hunt_group_call_logs(group_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_hunt_group_call_logs_start_time ON hunt_group_call_logs(start_time)`,
-	}
-
-	for _, query := range queries {
-		if err := m.db.Exec(query); err != nil {
-			return fmt.Errorf("failed to create hunt group table: %w", err)
-		}
-	}
-
-	m.logger.Info("Hunt group database tables initialized")
-	return nil
 }
 
 // CreateGroup creates a new hunt group
-func (m *Manager) CreateGroup(group *HuntGroup) error {
-	if group == nil {
-		return fmt.Errorf("group cannot be nil")
+func (m *DatabaseManager) CreateGroup(group *HuntGroup) error {
+	if err := m.validateHuntGroup(group); err != nil {
+		return fmt.Errorf("hunt group validation failed: %w", err)
 	}
 
-	if group.Name == "" || group.Extension == "" {
-		return fmt.Errorf("group name and extension are required")
-	}
-
+	// Set timestamps
 	now := time.Now().UTC()
 	group.CreatedAt = now
 	group.UpdatedAt = now
 
-	query := `INSERT INTO hunt_groups (name, extension, strategy, ring_timeout, enabled, description, created_at, updated_at)
-			  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-
-	result, err := m.db.ExecWithResult(query, 
-		group.Name, group.Extension, string(group.Strategy), group.RingTimeout, 
-		group.Enabled, group.Description, group.CreatedAt, group.UpdatedAt)
-	if err != nil {
-		return fmt.Errorf("failed to create hunt group: %w", err)
+	// Convert to database format and store
+	dbHG := m.toDatabase(group)
+	if err := m.db.CreateHuntGroup(dbHG); err != nil {
+		return fmt.Errorf("failed to create hunt group in database: %w", err)
 	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("failed to get hunt group ID: %w", err)
-	}
-
-	group.ID = int(id)
-
-	m.logger.Info("Hunt group created", 
-		logging.Field{Key: "id", Value: group.ID},
-		logging.Field{Key: "name", Value: group.Name},
-		logging.Field{Key: "extension", Value: group.Extension})
 
 	return nil
 }
 
 // GetGroup retrieves a hunt group by ID
-func (m *Manager) GetGroup(id int) (*HuntGroup, error) {
-	query := `SELECT id, name, extension, strategy, ring_timeout, enabled, description, created_at, updated_at
-			  FROM hunt_groups WHERE id = ?`
-
-	var group HuntGroup
-	dest := []interface{}{&group.ID, &group.Name, &group.Extension, 
-		&group.Strategy, &group.RingTimeout, &group.Enabled, &group.Description,
-		&group.CreatedAt, &group.UpdatedAt}
-	err := m.db.QueryRow(query, dest, id)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("hunt group not found")
-		}
-		return nil, fmt.Errorf("failed to get hunt group: %w", err)
+func (m *DatabaseManager) GetGroup(id int) (*HuntGroup, error) {
+	if id <= 0 {
+		return nil, fmt.Errorf("hunt group ID must be positive")
 	}
 
-	// Load members
-	members, err := m.GetGroupMembers(id)
+	dbHG, err := m.db.GetHuntGroup(strconv.Itoa(id))
 	if err != nil {
-		return nil, fmt.Errorf("failed to load group members: %w", err)
+		return nil, fmt.Errorf("failed to get hunt group from database: %w", err)
 	}
-	group.Members = members
 
-	return &group, nil
+	hg, err := m.fromDatabase(dbHG)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert hunt group from database format: %w", err)
+	}
+
+	return hg, nil
 }
 
 // GetGroupByExtension retrieves a hunt group by extension
-func (m *Manager) GetGroupByExtension(extension string) (*HuntGroup, error) {
-	query := `SELECT id, name, extension, strategy, ring_timeout, enabled, description, created_at, updated_at
-			  FROM hunt_groups WHERE extension = ? AND enabled = 1`
-
-	var group HuntGroup
-	dest := []interface{}{&group.ID, &group.Name, &group.Extension,
-		&group.Strategy, &group.RingTimeout, &group.Enabled, &group.Description,
-		&group.CreatedAt, &group.UpdatedAt}
-	err := m.db.QueryRow(query, dest, extension)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("hunt group not found")
-		}
-		return nil, fmt.Errorf("failed to get hunt group: %w", err)
+func (m *DatabaseManager) GetGroupByExtension(extension string) (*HuntGroup, error) {
+	if extension == "" {
+		return nil, fmt.Errorf("hunt group extension cannot be empty")
 	}
 
-	// Load members
-	members, err := m.GetGroupMembers(group.ID)
+	dbHG, err := m.db.GetHuntGroupByExtension(extension)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load group members: %w", err)
+		return nil, fmt.Errorf("failed to get hunt group by extension from database: %w", err)
 	}
-	group.Members = members
 
-	return &group, nil
+	hg, err := m.fromDatabase(dbHG)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert hunt group from database format: %w", err)
+	}
+
+	return hg, nil
 }
 
 // UpdateGroup updates an existing hunt group
-func (m *Manager) UpdateGroup(group *HuntGroup) error {
-	if group == nil {
-		return fmt.Errorf("group cannot be nil")
+func (m *DatabaseManager) UpdateGroup(group *HuntGroup) error {
+	if err := m.validateHuntGroup(group); err != nil {
+		return fmt.Errorf("hunt group validation failed: %w", err)
 	}
 
+	// Update timestamp
 	group.UpdatedAt = time.Now().UTC()
 
-	query := `UPDATE hunt_groups 
-			  SET name = ?, extension = ?, strategy = ?, ring_timeout = ?, enabled = ?, description = ?, updated_at = ?
-			  WHERE id = ?`
-
-	err := m.db.Exec(query, group.Name, group.Extension, string(group.Strategy), 
-		group.RingTimeout, group.Enabled, group.Description, group.UpdatedAt, group.ID)
-	if err != nil {
-		return fmt.Errorf("failed to update hunt group: %w", err)
+	// Convert to database format and update
+	dbHG := m.toDatabase(group)
+	if err := m.db.UpdateHuntGroup(dbHG); err != nil {
+		return fmt.Errorf("failed to update hunt group in database: %w", err)
 	}
-
-	m.logger.Info("Hunt group updated",
-		logging.Field{Key: "id", Value: group.ID},
-		logging.Field{Key: "name", Value: group.Name})
 
 	return nil
 }
 
 // DeleteGroup deletes a hunt group
-func (m *Manager) DeleteGroup(id int) error {
-	query := `DELETE FROM hunt_groups WHERE id = ?`
-
-	err := m.db.Exec(query, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete hunt group: %w", err)
+func (m *DatabaseManager) DeleteGroup(id int) error {
+	if id <= 0 {
+		return fmt.Errorf("hunt group ID must be positive")
 	}
 
-	m.logger.Info("Hunt group deleted", logging.Field{Key: "id", Value: id})
+	if err := m.db.DeleteHuntGroup(strconv.Itoa(id)); err != nil {
+		return fmt.Errorf("failed to delete hunt group from database: %w", err)
+	}
+
 	return nil
 }
 
-// ListGroups retrieves all hunt groups
-func (m *Manager) ListGroups() ([]*HuntGroup, error) {
-	query := `SELECT id, name, extension, strategy, ring_timeout, enabled, description, created_at, updated_at
-			  FROM hunt_groups ORDER BY name`
-
-	rows, err := m.db.Query(query)
+// ListGroups returns all hunt groups
+func (m *DatabaseManager) ListGroups() ([]*HuntGroup, error) {
+	dbHGs, err := m.db.ListHuntGroups()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list hunt groups: %w", err)
-	}
-	defer rows.Close()
-
-	var groups []*HuntGroup
-	for rows.Next() {
-		var group HuntGroup
-		err := rows.Scan(&group.ID, &group.Name, &group.Extension, &group.Strategy,
-			&group.RingTimeout, &group.Enabled, &group.Description,
-			&group.CreatedAt, &group.UpdatedAt)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan hunt group: %w", err)
-		}
-
-		// Load members for each group
-		members, err := m.GetGroupMembers(group.ID)
-		if err != nil {
-			m.logger.Warn("Failed to load members for group",
-				logging.Field{Key: "group_id", Value: group.ID},
-				logging.Field{Key: "error", Value: err})
-			members = []*HuntGroupMember{} // Empty slice instead of nil
-		}
-		group.Members = members
-
-		groups = append(groups, &group)
+		return nil, fmt.Errorf("failed to list hunt groups from database: %w", err)
 	}
 
-	return groups, nil
+	huntGroups := make([]*HuntGroup, len(dbHGs))
+	for i, dbHG := range dbHGs {
+		hg, err := m.fromDatabase(dbHG)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert hunt group %d from database format: %w", i, err)
+		}
+		huntGroups[i] = hg
+	}
+
+	return huntGroups, nil
 }
 
 // AddMember adds a member to a hunt group
-func (m *Manager) AddMember(groupID int, member *HuntGroupMember) error {
-	if member == nil {
-		return fmt.Errorf("member cannot be nil")
+func (m *DatabaseManager) AddMember(groupID int, member *HuntGroupMember) error {
+	if err := m.validateHuntGroupMember(member); err != nil {
+		return fmt.Errorf("hunt group member validation failed: %w", err)
 	}
 
-	if member.Extension == "" {
-		return fmt.Errorf("member extension is required")
+	// Get the hunt group
+	group, err := m.GetGroup(groupID)
+	if err != nil {
+		return fmt.Errorf("failed to get hunt group: %w", err)
 	}
 
-	now := time.Now().UTC()
+	// Check for duplicate extension within the group
+	for _, existingMember := range group.Members {
+		if existingMember.Extension == member.Extension {
+			return fmt.Errorf("member with extension %s already exists in hunt group", member.Extension)
+		}
+	}
+
+	// Set member group ID and timestamps
 	member.GroupID = groupID
+	now := time.Now().UTC()
 	member.CreatedAt = now
 	member.UpdatedAt = now
 
-	query := `INSERT INTO hunt_group_members (group_id, extension, priority, enabled, timeout, created_at, updated_at)
-			  VALUES (?, ?, ?, ?, ?, ?, ?)`
-
-	result, err := m.db.ExecWithResult(query, member.GroupID, member.Extension, 
-		member.Priority, member.Enabled, member.Timeout, member.CreatedAt, member.UpdatedAt)
-	if err != nil {
-		return fmt.Errorf("failed to add hunt group member: %w", err)
+	// Generate ID if not set
+	if member.ID == 0 {
+		member.ID = m.generateMemberID(group.Members)
 	}
 
-	id, err := result.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("failed to get member ID: %w", err)
+	// Add member to the group
+	group.Members = append(group.Members, member)
+
+	// Update the group
+	if err := m.UpdateGroup(group); err != nil {
+		return fmt.Errorf("failed to update hunt group with new member: %w", err)
 	}
-
-	member.ID = int(id)
-
-	m.logger.Info("Hunt group member added",
-		logging.Field{Key: "group_id", Value: groupID},
-		logging.Field{Key: "member_id", Value: member.ID},
-		logging.Field{Key: "extension", Value: member.Extension})
 
 	return nil
 }
 
 // RemoveMember removes a member from a hunt group
-func (m *Manager) RemoveMember(groupID int, memberID int) error {
-	query := `DELETE FROM hunt_group_members WHERE id = ? AND group_id = ?`
-
-	err := m.db.Exec(query, memberID, groupID)
+func (m *DatabaseManager) RemoveMember(groupID int, memberID int) error {
+	// Get the hunt group
+	group, err := m.GetGroup(groupID)
 	if err != nil {
-		return fmt.Errorf("failed to remove hunt group member: %w", err)
+		return fmt.Errorf("failed to get hunt group: %w", err)
 	}
 
-	m.logger.Info("Hunt group member removed",
-		logging.Field{Key: "group_id", Value: groupID},
-		logging.Field{Key: "member_id", Value: memberID})
+	// Find and remove the member
+	for i, member := range group.Members {
+		if member.ID == memberID {
+			group.Members = append(group.Members[:i], group.Members[i+1:]...)
+			break
+		}
+	}
+
+	// Update the group
+	if err := m.UpdateGroup(group); err != nil {
+		return fmt.Errorf("failed to update hunt group after removing member: %w", err)
+	}
 
 	return nil
 }
 
 // UpdateMember updates a hunt group member
-func (m *Manager) UpdateMember(member *HuntGroupMember) error {
-	if member == nil {
-		return fmt.Errorf("member cannot be nil")
+func (m *DatabaseManager) UpdateMember(member *HuntGroupMember) error {
+	if err := m.validateHuntGroupMember(member); err != nil {
+		return fmt.Errorf("hunt group member validation failed: %w", err)
 	}
 
-	member.UpdatedAt = time.Now().UTC()
-
-	query := `UPDATE hunt_group_members 
-			  SET extension = ?, priority = ?, enabled = ?, timeout = ?, updated_at = ?
-			  WHERE id = ?`
-
-	err := m.db.Exec(query, member.Extension, member.Priority, member.Enabled, 
-		member.Timeout, member.UpdatedAt, member.ID)
+	// Get the hunt group
+	group, err := m.GetGroup(member.GroupID)
 	if err != nil {
-		return fmt.Errorf("failed to update hunt group member: %w", err)
+		return fmt.Errorf("failed to get hunt group: %w", err)
 	}
 
-	m.logger.Info("Hunt group member updated",
-		logging.Field{Key: "member_id", Value: member.ID},
-		logging.Field{Key: "extension", Value: member.Extension})
-
-	return nil
-}
-
-// GetGroupMembers retrieves all members of a hunt group
-func (m *Manager) GetGroupMembers(groupID int) ([]*HuntGroupMember, error) {
-	query := `SELECT id, group_id, extension, priority, enabled, timeout, created_at, updated_at
-			  FROM hunt_group_members WHERE group_id = ? ORDER BY priority ASC, extension ASC`
-
-	rows, err := m.db.Query(query, groupID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get hunt group members: %w", err)
-	}
-	defer rows.Close()
-
-	var members []*HuntGroupMember
-	for rows.Next() {
-		var member HuntGroupMember
-		var timeout sql.NullInt64
-
-		err := rows.Scan(&member.ID, &member.GroupID, &member.Extension, &member.Priority,
-			&member.Enabled, &timeout, &member.CreatedAt, &member.UpdatedAt)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan hunt group member: %w", err)
+	// Find and update the member
+	found := false
+	for i, existingMember := range group.Members {
+		if existingMember.ID == member.ID {
+			member.UpdatedAt = time.Now().UTC()
+			group.Members[i] = member
+			found = true
+			break
 		}
-
-		if timeout.Valid {
-			member.Timeout = int(timeout.Int64)
-		}
-
-		members = append(members, &member)
 	}
 
-	return members, nil
-}
-
-// CreateSession creates a new call session (for logging)
-func (m *Manager) CreateSession(session *CallSession) error {
-	if session == nil {
-		return fmt.Errorf("session cannot be nil")
+	if !found {
+		return fmt.Errorf("member not found in hunt group")
 	}
 
-	query := `INSERT INTO hunt_group_call_logs (group_id, session_id, caller_uri, start_time, status)
-			  VALUES (?, ?, ?, ?, ?)`
-
-	err := m.db.Exec(query, session.GroupID, session.ID, session.CallerURI, 
-		session.StartTime, string(session.Status))
-	if err != nil {
-		return fmt.Errorf("failed to create call session log: %w", err)
+	// Update the group
+	if err := m.UpdateGroup(group); err != nil {
+		return fmt.Errorf("failed to update hunt group with updated member: %w", err)
 	}
 
 	return nil
 }
 
-// GetSession retrieves a call session (stub implementation)
-func (m *Manager) GetSession(sessionID string) (*CallSession, error) {
-	// This would typically be stored in memory or a cache
-	// For now, return not found
-	return nil, fmt.Errorf("session not found")
+// GetGroupMembers returns all members of a hunt group
+func (m *DatabaseManager) GetGroupMembers(groupID int) ([]*HuntGroupMember, error) {
+	group, err := m.GetGroup(groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get hunt group: %w", err)
+	}
+
+	return group.Members, nil
 }
 
-// UpdateSession updates a call session (for logging)
-func (m *Manager) UpdateSession(session *CallSession) error {
-	if session == nil {
-		return fmt.Errorf("session cannot be nil")
+// CreateSession creates a new call session
+func (m *DatabaseManager) CreateSession(session *CallSession) error {
+	if err := m.validateCallSession(session); err != nil {
+		return fmt.Errorf("call session validation failed: %w", err)
 	}
 
-	query := `UPDATE hunt_group_call_logs 
-			  SET answered_by = ?, answer_time = ?, end_time = ?, status = ?, 
-			      ring_duration = ?, call_duration = ?
-			  WHERE session_id = ?`
-
-	var ringDuration, callDuration *int
-	if session.AnsweredAt != nil {
-		rd := int(session.AnsweredAt.Sub(session.StartTime).Seconds())
-		ringDuration = &rd
-
-		if session.Status == SessionStatusCompleted {
-			cd := int(time.Now().Sub(*session.AnsweredAt).Seconds())
-			callDuration = &cd
-		}
+	// For now, we'll store call sessions as hunt group calls
+	// This is a simplified implementation
+	call := &database.HuntGroupCall{
+		ID:          session.ID,
+		HuntGroupID: strconv.Itoa(session.GroupID),
+		SessionID:   session.ID,
+		CallerURI:   session.CallerURI,
+		CallerName:  "", // Extract from SIP message if needed
+		Status:      string(session.Status),
+		AnsweredBy:  session.AnsweredBy,
+		AnsweredAt:  session.AnsweredAt,
+		Duration:    0, // Will be calculated later
+		CreatedAt:   session.StartTime,
+		UpdatedAt:   session.StartTime,
 	}
 
-	err := m.db.Exec(query, session.AnsweredBy, session.AnsweredAt, 
-		time.Now().UTC(), string(session.Status), ringDuration, callDuration, session.ID)
+	if err := m.db.CreateHuntGroupCall(call); err != nil {
+		return fmt.Errorf("failed to create call session in database: %w", err)
+	}
+
+	return nil
+}
+
+// GetSession retrieves a call session by ID
+func (m *DatabaseManager) GetSession(sessionID string) (*CallSession, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID cannot be empty")
+	}
+
+	dbCall, err := m.db.GetHuntGroupCall(sessionID)
 	if err != nil {
-		return fmt.Errorf("failed to update call session log: %w", err)
+		return nil, fmt.Errorf("failed to get call session from database: %w", err)
+	}
+
+	groupID, err := strconv.Atoi(dbCall.HuntGroupID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid group ID in database: %w", err)
+	}
+
+	session := &CallSession{
+		ID:         dbCall.ID,
+		GroupID:    groupID,
+		CallerURI:  dbCall.CallerURI,
+		StartTime:  dbCall.CreatedAt,
+		Status:     CallSessionStatus(dbCall.Status),
+		AnsweredBy: dbCall.AnsweredBy,
+		AnsweredAt: dbCall.AnsweredAt,
+	}
+
+	return session, nil
+}
+
+// UpdateSession updates a call session
+func (m *DatabaseManager) UpdateSession(session *CallSession) error {
+	if err := m.validateCallSession(session); err != nil {
+		return fmt.Errorf("call session validation failed: %w", err)
+	}
+
+	call := &database.HuntGroupCall{
+		ID:          session.ID,
+		HuntGroupID: strconv.Itoa(session.GroupID),
+		SessionID:   session.ID,
+		CallerURI:   session.CallerURI,
+		Status:      string(session.Status),
+		AnsweredBy:  session.AnsweredBy,
+		AnsweredAt:  session.AnsweredAt,
+		UpdatedAt:   time.Now().UTC(),
+	}
+
+	if err := m.db.UpdateHuntGroupCall(call); err != nil {
+		return fmt.Errorf("failed to update call session in database: %w", err)
 	}
 
 	return nil
 }
 
 // EndSession ends a call session
-func (m *Manager) EndSession(sessionID string) error {
-	query := `UPDATE hunt_group_call_logs 
-			  SET end_time = ?, status = ?
-			  WHERE session_id = ? AND end_time IS NULL`
-
-	err := m.db.Exec(query, time.Now().UTC(), string(SessionStatusCompleted), sessionID)
+func (m *DatabaseManager) EndSession(sessionID string) error {
+	session, err := m.GetSession(sessionID)
 	if err != nil {
-		return fmt.Errorf("failed to end call session: %w", err)
+		return fmt.Errorf("failed to get session for ending: %w", err)
+	}
+
+	session.Status = SessionStatusCompleted
+	if err := m.UpdateSession(session); err != nil {
+		return fmt.Errorf("failed to end session: %w", err)
 	}
 
 	return nil
 }
 
-// GetActiveSessions retrieves active call sessions (stub implementation)
-func (m *Manager) GetActiveSessions() ([]*CallSession, error) {
-	// This would typically be stored in memory or a cache
-	// For now, return empty slice
+// GetActiveSessions returns all active call sessions
+func (m *DatabaseManager) GetActiveSessions() ([]*CallSession, error) {
+	// This is a simplified implementation
+	// In a real implementation, you'd query for active sessions
 	return []*CallSession{}, nil
 }
 
-// GetCallStatistics retrieves call statistics for a hunt group
-func (m *Manager) GetCallStatistics(groupID int) (*CallStatistics, error) {
+// GetCallStatistics returns call statistics for a hunt group
+func (m *DatabaseManager) GetCallStatistics(groupID int) (*CallStatistics, error) {
+	calls, err := m.db.ListHuntGroupCalls(strconv.Itoa(groupID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get hunt group calls: %w", err)
+	}
+
 	stats := &CallStatistics{
-		GroupID: groupID,
+		GroupID:    groupID,
+		TotalCalls: len(calls),
 	}
 
-	// Get total calls
-	query := `SELECT COUNT(*) FROM hunt_group_call_logs WHERE group_id = ?`
-	dest := []interface{}{&stats.TotalCalls}
-	err := m.db.QueryRow(query, dest, groupID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get total calls: %w", err)
+	var totalRingTime time.Duration
+	var totalCallLength time.Duration
+	memberCallCounts := make(map[string]int)
+
+	for _, call := range calls {
+		if call.Status == "answered" {
+			stats.AnsweredCalls++
+			if call.AnsweredAt != nil {
+				ringTime := call.AnsweredAt.Sub(call.CreatedAt)
+				totalRingTime += ringTime
+			}
+			if call.AnsweredBy != "" {
+				memberCallCounts[call.AnsweredBy]++
+			}
+		} else {
+			stats.MissedCalls++
+		}
+
+		if stats.LastCallTime == nil || call.CreatedAt.After(*stats.LastCallTime) {
+			stats.LastCallTime = &call.CreatedAt
+		}
+
+		if call.Duration > 0 {
+			totalCallLength += time.Duration(call.Duration) * time.Second
+		}
 	}
 
-	// Get answered calls
-	query = `SELECT COUNT(*) FROM hunt_group_call_logs WHERE group_id = ? AND answered_by IS NOT NULL`
-	dest = []interface{}{&stats.AnsweredCalls}
-	err = m.db.QueryRow(query, dest, groupID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get answered calls: %w", err)
+	// Calculate averages
+	if stats.AnsweredCalls > 0 {
+		stats.AverageRingTime = totalRingTime / time.Duration(stats.AnsweredCalls)
+		stats.AverageCallLength = totalCallLength / time.Duration(stats.AnsweredCalls)
 	}
 
-	stats.MissedCalls = stats.TotalCalls - stats.AnsweredCalls
-
-	// Get average ring time
-	query = `SELECT AVG(ring_duration) FROM hunt_group_call_logs WHERE group_id = ? AND ring_duration IS NOT NULL`
-	var avgRingSeconds sql.NullFloat64
-	dest = []interface{}{&avgRingSeconds}
-	err = m.db.QueryRow(query, dest, groupID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get average ring time: %w", err)
-	}
-	if avgRingSeconds.Valid {
-		stats.AverageRingTime = time.Duration(avgRingSeconds.Float64) * time.Second
-	}
-
-	// Get average call length
-	query = `SELECT AVG(call_duration) FROM hunt_group_call_logs WHERE group_id = ? AND call_duration IS NOT NULL`
-	var avgCallSeconds sql.NullFloat64
-	dest = []interface{}{&avgCallSeconds}
-	err = m.db.QueryRow(query, dest, groupID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get average call length: %w", err)
-	}
-	if avgCallSeconds.Valid {
-		stats.AverageCallLength = time.Duration(avgCallSeconds.Float64) * time.Second
-	}
-
-	// Get busiest member
-	query = `SELECT answered_by, COUNT(*) as call_count 
-			 FROM hunt_group_call_logs 
-			 WHERE group_id = ? AND answered_by IS NOT NULL 
-			 GROUP BY answered_by 
-			 ORDER BY call_count DESC 
-			 LIMIT 1`
-	var callCount int
-	dest = []interface{}{&stats.BusiestMember, &callCount}
-	err = m.db.QueryRow(query, dest, groupID)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, fmt.Errorf("failed to get busiest member: %w", err)
-	}
-
-	// Get last call time
-	query = `SELECT MAX(start_time) FROM hunt_group_call_logs WHERE group_id = ?`
-	var lastCallTime sql.NullTime
-	dest = []interface{}{&lastCallTime}
-	err = m.db.QueryRow(query, dest, groupID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get last call time: %w", err)
-	}
-	if lastCallTime.Valid {
-		stats.LastCallTime = &lastCallTime.Time
+	// Find busiest member
+	maxCalls := 0
+	for member, count := range memberCallCounts {
+		if count > maxCalls {
+			maxCalls = count
+			stats.BusiestMember = member
+		}
 	}
 
 	return stats, nil
+}
+
+// EnableGroup enables a hunt group
+func (m *DatabaseManager) EnableGroup(groupID int) error {
+	group, err := m.GetGroup(groupID)
+	if err != nil {
+		return fmt.Errorf("failed to get hunt group: %w", err)
+	}
+
+	group.Enabled = true
+	if err := m.UpdateGroup(group); err != nil {
+		return fmt.Errorf("failed to enable hunt group: %w", err)
+	}
+
+	return nil
+}
+
+// DisableGroup disables a hunt group
+func (m *DatabaseManager) DisableGroup(groupID int) error {
+	group, err := m.GetGroup(groupID)
+	if err != nil {
+		return fmt.Errorf("failed to get hunt group: %w", err)
+	}
+
+	group.Enabled = false
+	if err := m.UpdateGroup(group); err != nil {
+		return fmt.Errorf("failed to disable hunt group: %w", err)
+	}
+
+	return nil
+}
+
+// EnableMember enables a hunt group member
+func (m *DatabaseManager) EnableMember(groupID int, memberID int) error {
+	group, err := m.GetGroup(groupID)
+	if err != nil {
+		return fmt.Errorf("failed to get hunt group: %w", err)
+	}
+
+	for _, member := range group.Members {
+		if member.ID == memberID {
+			member.Enabled = true
+			member.UpdatedAt = time.Now().UTC()
+			break
+		}
+	}
+
+	if err := m.UpdateGroup(group); err != nil {
+		return fmt.Errorf("failed to enable hunt group member: %w", err)
+	}
+
+	return nil
+}
+
+// DisableMember disables a hunt group member
+func (m *DatabaseManager) DisableMember(groupID int, memberID int) error {
+	group, err := m.GetGroup(groupID)
+	if err != nil {
+		return fmt.Errorf("failed to get hunt group: %w", err)
+	}
+
+	for _, member := range group.Members {
+		if member.ID == memberID {
+			member.Enabled = false
+			member.UpdatedAt = time.Now().UTC()
+			break
+		}
+	}
+
+	if err := m.UpdateGroup(group); err != nil {
+		return fmt.Errorf("failed to disable hunt group member: %w", err)
+	}
+
+	return nil
+}
+
+// Helper methods for validation and conversion
+
+func (m *DatabaseManager) validateHuntGroup(group *HuntGroup) error {
+	if group.Name == "" {
+		return fmt.Errorf("hunt group name cannot be empty")
+	}
+
+	if group.Extension == "" {
+		return fmt.Errorf("hunt group extension cannot be empty")
+	}
+
+	if group.RingTimeout <= 0 {
+		return fmt.Errorf("hunt group ring timeout must be positive")
+	}
+
+	if group.RingTimeout > 300 {
+		return fmt.Errorf("hunt group ring timeout cannot exceed 300 seconds")
+	}
+
+	return nil
+}
+
+func (m *DatabaseManager) validateHuntGroupMember(member *HuntGroupMember) error {
+	if member.Extension == "" {
+		return fmt.Errorf("hunt group member extension cannot be empty")
+	}
+
+	if member.Priority < 0 {
+		return fmt.Errorf("hunt group member priority cannot be negative")
+	}
+
+	if member.Timeout <= 0 {
+		return fmt.Errorf("hunt group member timeout must be positive")
+	}
+
+	if member.Timeout > 120 {
+		return fmt.Errorf("hunt group member timeout cannot exceed 120 seconds")
+	}
+
+	return nil
+}
+
+func (m *DatabaseManager) validateCallSession(session *CallSession) error {
+	if session.ID == "" {
+		return fmt.Errorf("call session ID cannot be empty")
+	}
+
+	if session.GroupID <= 0 {
+		return fmt.Errorf("call session group ID must be positive")
+	}
+
+	if session.CallerURI == "" {
+		return fmt.Errorf("call session caller URI cannot be empty")
+	}
+
+	return nil
+}
+
+func (m *DatabaseManager) toDatabase(group *HuntGroup) *database.HuntGroup {
+	// Convert members to database format
+	dbMembers := make([]database.HuntGroupMember, len(group.Members))
+	for i, member := range group.Members {
+		dbMembers[i] = database.HuntGroupMember{
+			ID:          strconv.Itoa(member.ID),
+			URI:         member.Extension,
+			DisplayName: "", // Not available in current structure
+			Priority:    member.Priority,
+			Timeout:     member.Timeout,
+			Enabled:     member.Enabled,
+		}
+	}
+
+	return &database.HuntGroup{
+		ID:          strconv.Itoa(group.ID),
+		Name:        group.Name,
+		Extension:   group.Extension,
+		Description: group.Description,
+		Strategy:    string(group.Strategy),
+		Timeout:     group.RingTimeout,
+		Enabled:     group.Enabled,
+		Members:     dbMembers,
+		CreatedAt:   group.CreatedAt,
+		UpdatedAt:   group.UpdatedAt,
+	}
+}
+
+func (m *DatabaseManager) fromDatabase(dbHG *database.HuntGroup) (*HuntGroup, error) {
+	id, err := strconv.Atoi(dbHG.ID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid hunt group ID: %w", err)
+	}
+
+	// Convert members from database format
+	members := make([]*HuntGroupMember, len(dbHG.Members))
+	for i, dbMember := range dbHG.Members {
+		memberID, err := strconv.Atoi(dbMember.ID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid member ID: %w", err)
+		}
+
+		members[i] = &HuntGroupMember{
+			ID:        memberID,
+			GroupID:   id,
+			Extension: dbMember.URI, // Using URI as extension
+			Priority:  dbMember.Priority,
+			Enabled:   dbMember.Enabled,
+			Timeout:   dbMember.Timeout,
+			CreatedAt: time.Now().UTC(), // Default timestamp
+			UpdatedAt: time.Now().UTC(), // Default timestamp
+		}
+	}
+
+	return &HuntGroup{
+		ID:          id,
+		Name:        dbHG.Name,
+		Extension:   dbHG.Extension,
+		Strategy:    HuntGroupStrategy(dbHG.Strategy),
+		RingTimeout: dbHG.Timeout,
+		Enabled:     dbHG.Enabled,
+		Description: dbHG.Description,
+		CreatedAt:   dbHG.CreatedAt,
+		UpdatedAt:   dbHG.UpdatedAt,
+		Members:     members,
+	}, nil
+}
+
+// generateMemberID generates a unique ID for a new member within a hunt group
+func (m *DatabaseManager) generateMemberID(existingMembers []*HuntGroupMember) int {
+	maxID := 0
+	for _, member := range existingMembers {
+		if member.ID > maxID {
+			maxID = member.ID
+		}
+	}
+	return maxID + 1
 }
