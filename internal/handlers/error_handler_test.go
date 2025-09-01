@@ -13,13 +13,13 @@ func TestErrorType_String(t *testing.T) {
 		errorType ErrorType
 		expected  string
 	}{
-		{ErrorTypeParseError, "ParseError"},
-		{ErrorTypeValidationError, "ValidationError"},
-		{ErrorTypeProcessingError, "ProcessingError"},
-		{ErrorTypeTransportError, "TransportError"},
-		{ErrorTypeAuthenticationError, "AuthenticationError"},
-		{ErrorTypeSessionTimerError, "SessionTimerError"},
-		{ErrorType(999), "UnknownError"},
+		{ErrorTypeParseError, "parse_error"},
+		{ErrorTypeValidationError, "validation_error"},
+		{ErrorTypeProcessingError, "processing_error"},
+		{ErrorTypeTransportError, "transport_error"},
+		{ErrorTypeAuthenticationError, "authentication_error"},
+		{ErrorTypeSessionTimerError, "session_timer_error"},
+		{ErrorType(999), "unknown_error"},
 	}
 	
 	for _, test := range tests {

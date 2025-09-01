@@ -246,11 +246,15 @@ func (s *SIPServerImpl) initializeComponents() error {
 		s.config.Server.UDPPort,
 	)
 	
-	// 10. Initialize validated handler manager with validation chain
+	// 10. Initialize transport manager first
+	s.transportManager = transport.NewManager()
+	s.logger.Info("Transport manager initialized")
+	
+	// 11. Initialize validated handler manager with validation chain
 	validatedManager := handlers.NewValidatedManager()
 	
-	// Set up the validation chain with default validators
-	validationConfig := handlers.DefaultValidationConfig()
+	// Set up the validation chain with configuration from server config
+	validationConfig := s.createValidationConfig()
 	validatedManager.SetupDefaultValidators(validationConfig)
 	
 	// Set the underlying handler manager
@@ -262,27 +266,21 @@ func (s *SIPServerImpl) initializeComponents() error {
 	// Create transport adapter to bridge ValidatedManager with transport.MessageHandler
 	transportAdapter := handlers.NewTransportAdapter(
 		validatedManager,
-		s.messageParser,
 		s.transactionManager,
-		s.logger,
+		s.messageParser,
+		s.transportManager,
 	)
 	
 	s.handlerManager = transportAdapter
 	s.logger.Info("Validated handler manager initialized with validation chain")
 	
-	// 11. Initialize transport manager
-	s.transportManager = transport.NewManager()
+	// Register the transport adapter as the message handler
 	s.transportManager.RegisterHandler(s.handlerManager)
-	
-	// Set transport manager in handler manager for response sending
-	if setter, ok := s.handlerManager.(interface{ SetTransportManager(transport.TransportManager) }); ok {
-		setter.SetTransportManager(s.transportManager)
-	}
 	
 	s.logger.Info("Transport manager initialized")
 	
 	// 12. Initialize web admin server
-	s.webAdminServer = webadmin.NewServer(s.userManager, s.logger)
+	s.webAdminServer = webadmin.NewServer(s.userManager, nil, nil, s.logger)
 	s.logger.Info("Web admin server initialized")
 	
 	return nil
@@ -371,6 +369,23 @@ func (s *SIPServerImpl) sessionTimerCleanupRoutine() {
 		case <-ticker.C:
 			s.sessionTimerMgr.CleanupExpiredSessions()
 		}
+	}
+}
+
+// createValidationConfig creates validation configuration from server config
+func (s *SIPServerImpl) createValidationConfig() handlers.ValidationConfig {
+	return handlers.ValidationConfig{
+		SessionTimerConfig: handlers.SessionTimerConfig{
+			Enabled:        s.config.SessionTimer.Enabled,
+			MinSE:          s.config.SessionTimer.MinSE,
+			DefaultSE:      s.config.SessionTimer.DefaultExpires,
+			RequireSupport: s.config.SessionTimer.RequireSupport,
+		},
+		AuthConfig: handlers.AuthConfig{
+			Enabled:     s.config.Authentication.Enabled,
+			RequireAuth: s.config.Authentication.RequireAuth,
+			Realm:       s.config.Authentication.Realm,
+		},
 	}
 }
 

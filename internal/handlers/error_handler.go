@@ -24,19 +24,19 @@ const (
 func (et ErrorType) String() string {
 	switch et {
 	case ErrorTypeParseError:
-		return "ParseError"
+		return "parse_error"
 	case ErrorTypeValidationError:
-		return "ValidationError"
+		return "validation_error"
 	case ErrorTypeProcessingError:
-		return "ProcessingError"
+		return "processing_error"
 	case ErrorTypeTransportError:
-		return "TransportError"
+		return "transport_error"
 	case ErrorTypeAuthenticationError:
-		return "AuthenticationError"
+		return "authentication_error"
 	case ErrorTypeSessionTimerError:
-		return "SessionTimerError"
+		return "session_timer_error"
 	default:
-		return "UnknownError"
+		return "unknown_error"
 	}
 }
 
@@ -117,6 +117,12 @@ type ErrorStatistics struct {
 	AuthErrors        int64
 	SessionTimerErrors int64
 	LastReset         time.Time
+}
+
+// TotalErrors returns the total number of errors across all types
+func (es *ErrorStatistics) TotalErrors() int64 {
+	return es.ParseErrors + es.ValidationErrors + es.ProcessingErrors + 
+		   es.TransportErrors + es.AuthErrors + es.SessionTimerErrors
 }
 
 // ErrorResponseBuilder builds appropriate error responses

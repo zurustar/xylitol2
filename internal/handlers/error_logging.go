@@ -1,12 +1,15 @@
 package handlers
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/zurustar/xylitol2/internal/parser"
 )
+
+
 
 // ErrorLogger provides detailed logging for different types of errors
 type ErrorLogger interface {
@@ -1034,4 +1037,225 @@ func (del *DetailedErrorLogger) LogErrorSummary() {
 	}
 	
 	del.logger.Info("Error statistics summary", fields...)
+}
+
+
+
+// ErrorStatisticsCollector provides advanced statistics collection and analysis
+type ErrorStatisticsCollector struct {
+	logger         ErrorLogger
+	metrics        map[string]*ErrorMetric
+	collectors     []MetricCollector
+	mutex          sync.RWMutex
+	collectInterval time.Duration
+	stopChan       chan struct{}
+}
+
+// ErrorMetric represents a specific error metric
+type ErrorMetric struct {
+	Name        string
+	Value       float64
+	LastUpdated time.Time
+	History     []MetricPoint
+}
+
+// MetricPoint represents a point in time for a metric
+type MetricPoint struct {
+	Timestamp time.Time
+	Value     float64
+}
+
+// MetricCollector defines the interface for collecting metrics
+type MetricCollector interface {
+	CollectMetrics(stats ErrorStatistics) map[string]float64
+	Name() string
+}
+
+// NewErrorStatisticsCollector creates a new error statistics collector
+func NewErrorStatisticsCollector(logger ErrorLogger, collectInterval time.Duration) *ErrorStatisticsCollector {
+	esc := &ErrorStatisticsCollector{
+		logger:          logger,
+		metrics:         make(map[string]*ErrorMetric),
+		collectors:      make([]MetricCollector, 0),
+		collectInterval: collectInterval,
+		stopChan:        make(chan struct{}),
+	}
+	
+	// Add default collectors
+	esc.AddCollector(&ErrorRateCollector{})
+	esc.AddCollector(&ErrorTrendCollector{})
+	
+	return esc
+}
+
+// AddCollector adds a metric collector
+func (esc *ErrorStatisticsCollector) AddCollector(collector MetricCollector) {
+	esc.mutex.Lock()
+	defer esc.mutex.Unlock()
+	
+	esc.collectors = append(esc.collectors, collector)
+}
+
+// Start starts the statistics collection process
+func (esc *ErrorStatisticsCollector) Start() {
+	go esc.collectLoop()
+}
+
+// Stop stops the statistics collection process
+func (esc *ErrorStatisticsCollector) Stop() {
+	close(esc.stopChan)
+}
+
+// collectLoop runs the metric collection loop
+func (esc *ErrorStatisticsCollector) collectLoop() {
+	ticker := time.NewTicker(esc.collectInterval)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ticker.C:
+			esc.collectMetrics()
+		case <-esc.stopChan:
+			return
+		}
+	}
+}
+
+// collectMetrics collects metrics from all collectors
+func (esc *ErrorStatisticsCollector) collectMetrics() {
+	if esc.logger == nil {
+		return
+	}
+	
+	stats := esc.logger.GetErrorStatistics()
+	now := time.Now()
+	
+	esc.mutex.Lock()
+	defer esc.mutex.Unlock()
+	
+	for _, collector := range esc.collectors {
+		metrics := collector.CollectMetrics(stats)
+		
+		for name, value := range metrics {
+			metricName := fmt.Sprintf("%s.%s", collector.Name(), name)
+			
+			if metric, exists := esc.metrics[metricName]; exists {
+				metric.Value = value
+				metric.LastUpdated = now
+				metric.History = append(metric.History, MetricPoint{
+					Timestamp: now,
+					Value:     value,
+				})
+				
+				// Keep only last 100 points
+				if len(metric.History) > 100 {
+					metric.History = metric.History[1:]
+				}
+			} else {
+				esc.metrics[metricName] = &ErrorMetric{
+					Name:        metricName,
+					Value:       value,
+					LastUpdated: now,
+					History: []MetricPoint{{
+						Timestamp: now,
+						Value:     value,
+					}},
+				}
+			}
+		}
+	}
+}
+
+// GetMetrics returns current metrics
+func (esc *ErrorStatisticsCollector) GetMetrics() map[string]*ErrorMetric {
+	esc.mutex.RLock()
+	defer esc.mutex.RUnlock()
+	
+	// Create a deep copy
+	metrics := make(map[string]*ErrorMetric)
+	for k, v := range esc.metrics {
+		metrics[k] = &ErrorMetric{
+			Name:        v.Name,
+			Value:       v.Value,
+			LastUpdated: v.LastUpdated,
+			History:     append([]MetricPoint(nil), v.History...),
+		}
+	}
+	
+	return metrics
+}
+
+// ErrorRateCollector collects error rate metrics
+type ErrorRateCollector struct {
+	lastStats     ErrorStatistics
+	lastTimestamp time.Time
+}
+
+// Name returns the collector name
+func (erc *ErrorRateCollector) Name() string {
+	return "error_rate"
+}
+
+// CollectMetrics collects error rate metrics
+func (erc *ErrorRateCollector) CollectMetrics(stats ErrorStatistics) map[string]float64 {
+	now := time.Now()
+	metrics := make(map[string]float64)
+	
+	if !erc.lastTimestamp.IsZero() {
+		duration := now.Sub(erc.lastTimestamp).Seconds()
+		if duration > 0 {
+			metrics["parse_errors_per_second"] = float64(stats.ParseErrors-erc.lastStats.ParseErrors) / duration
+			metrics["validation_errors_per_second"] = float64(stats.ValidationErrors-erc.lastStats.ValidationErrors) / duration
+			metrics["processing_errors_per_second"] = float64(stats.ProcessingErrors-erc.lastStats.ProcessingErrors) / duration
+			metrics["transport_errors_per_second"] = float64(stats.TransportErrors-erc.lastStats.TransportErrors) / duration
+			metrics["total_errors_per_second"] = float64(stats.TotalErrors()-erc.lastStats.TotalErrors()) / duration
+		}
+	}
+	
+	erc.lastStats = stats
+	erc.lastTimestamp = now
+	
+	return metrics
+}
+
+// ErrorTrendCollector collects error trend metrics
+type ErrorTrendCollector struct {
+	history []ErrorStatistics
+}
+
+// Name returns the collector name
+func (etc *ErrorTrendCollector) Name() string {
+	return "error_trend"
+}
+
+// CollectMetrics collects error trend metrics
+func (etc *ErrorTrendCollector) CollectMetrics(stats ErrorStatistics) map[string]float64 {
+	metrics := make(map[string]float64)
+	
+	etc.history = append(etc.history, stats)
+	
+	// Keep only last 10 measurements for trend analysis
+	if len(etc.history) > 10 {
+		etc.history = etc.history[1:]
+	}
+	
+	if len(etc.history) >= 2 {
+		// Calculate trend (simple linear regression slope)
+		first := etc.history[0]
+		last := etc.history[len(etc.history)-1]
+		
+		totalFirst := first.TotalErrors()
+		totalLast := last.TotalErrors()
+		
+		if totalFirst > 0 {
+			metrics["error_growth_rate"] = float64(totalLast-totalFirst) / float64(totalFirst)
+		}
+		
+		metrics["parse_error_trend"] = float64(last.ParseErrors - first.ParseErrors)
+		metrics["validation_error_trend"] = float64(last.ValidationErrors - first.ValidationErrors)
+		metrics["processing_error_trend"] = float64(last.ProcessingErrors - first.ProcessingErrors)
+		metrics["transport_error_trend"] = float64(last.TransportErrors - first.TransportErrors)
+	}
+	
+	return metrics
 }

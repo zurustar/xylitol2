@@ -16,14 +16,29 @@ type TCPMessageFramer struct {
 	contentLength int
 	expectedBodyLength int
 	currentBodyLength  int
+	maxBufferSize      int  // Maximum buffer size to prevent memory exhaustion
+	maxMessageSize     int  // Maximum message size to prevent DoS attacks
 }
 
 // NewTCPMessageFramer creates a new TCP message framer
 func NewTCPMessageFramer() *TCPMessageFramer {
 	return &TCPMessageFramer{
-		buffer:        make([]byte, 0, 4096), // Initial buffer capacity
-		headersDone:   false,
-		contentLength: -1,
+		buffer:         make([]byte, 0, 4096), // Initial buffer capacity
+		headersDone:    false,
+		contentLength:  -1,
+		maxBufferSize:  1024 * 1024, // 1MB max buffer size
+		maxMessageSize: 10 * 1024 * 1024, // 10MB max message size
+	}
+}
+
+// NewTCPMessageFramerWithLimits creates a new TCP message framer with custom limits
+func NewTCPMessageFramerWithLimits(maxBufferSize, maxMessageSize int) *TCPMessageFramer {
+	return &TCPMessageFramer{
+		buffer:         make([]byte, 0, 4096),
+		headersDone:    false,
+		contentLength:  -1,
+		maxBufferSize:  maxBufferSize,
+		maxMessageSize: maxMessageSize,
 	}
 }
 
@@ -31,6 +46,12 @@ func NewTCPMessageFramer() *TCPMessageFramer {
 // Returns complete messages and any error encountered
 func (f *TCPMessageFramer) FrameMessage(data []byte) ([][]byte, error) {
 	var messages [][]byte
+	
+	// Check buffer size limits before appending new data
+	if len(f.buffer)+len(data) > f.maxBufferSize {
+		return nil, fmt.Errorf("buffer size limit exceeded: current=%d, incoming=%d, max=%d", 
+			len(f.buffer), len(data), f.maxBufferSize)
+	}
 	
 	// Append new data to buffer
 	f.buffer = append(f.buffer, data...)
@@ -44,6 +65,12 @@ func (f *TCPMessageFramer) FrameMessage(data []byte) ([][]byte, error) {
 		if message == nil {
 			// No complete message available, need more data
 			break
+		}
+		
+		// Check message size limits
+		if len(message) > f.maxMessageSize {
+			return nil, fmt.Errorf("message size limit exceeded: size=%d, max=%d", 
+				len(message), f.maxMessageSize)
 		}
 		
 		messages = append(messages, message)
@@ -161,6 +188,12 @@ func (f *TCPMessageFramer) parseContentLength(headers []byte) (int, error) {
 				return 0, fmt.Errorf("negative Content-Length value: %d", length)
 			}
 			
+			// Check against maximum message size
+			if length > f.maxMessageSize {
+				return 0, fmt.Errorf("Content-Length exceeds maximum message size: %d > %d", 
+					length, f.maxMessageSize)
+			}
+			
 			return length, nil
 		}
 	}
@@ -195,10 +228,13 @@ func (f *TCPMessageFramer) GetBufferSize() int {
 func (f *TCPMessageFramer) GetStats() map[string]interface{} {
 	return map[string]interface{}{
 		"buffer_size":           len(f.buffer),
+		"buffer_capacity":       cap(f.buffer),
 		"headers_done":          f.headersDone,
 		"content_length":        f.contentLength,
 		"expected_body_length":  f.expectedBodyLength,
 		"current_body_length":   f.currentBodyLength,
+		"max_buffer_size":       f.maxBufferSize,
+		"max_message_size":      f.maxMessageSize,
 	}
 }
 
@@ -206,6 +242,32 @@ func (f *TCPMessageFramer) GetStats() map[string]interface{} {
 func (f *TCPMessageFramer) Clear() {
 	f.buffer = f.buffer[:0]
 	f.reset()
+}
+
+// SetLimits updates the buffer and message size limits
+func (f *TCPMessageFramer) SetLimits(maxBufferSize, maxMessageSize int) {
+	f.maxBufferSize = maxBufferSize
+	f.maxMessageSize = maxMessageSize
+}
+
+// GetLimits returns the current buffer and message size limits
+func (f *TCPMessageFramer) GetLimits() (maxBufferSize, maxMessageSize int) {
+	return f.maxBufferSize, f.maxMessageSize
+}
+
+// IsBufferFull checks if the buffer is approaching its limit
+func (f *TCPMessageFramer) IsBufferFull() bool {
+	return len(f.buffer) > f.maxBufferSize*8/10 // 80% threshold
+}
+
+// CompactBuffer compacts the buffer to reduce memory usage
+func (f *TCPMessageFramer) CompactBuffer() {
+	if cap(f.buffer) > len(f.buffer)*2 && cap(f.buffer) > 4096 {
+		// Create a new buffer with appropriate capacity
+		newBuffer := make([]byte, len(f.buffer), len(f.buffer)+1024)
+		copy(newBuffer, f.buffer)
+		f.buffer = newBuffer
+	}
 }
 
 // StreamingTCPMessageReader provides a streaming interface for reading SIP messages from TCP

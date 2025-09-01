@@ -128,20 +128,28 @@ func GetDefaultConfig() *Config {
 			Path: "./sipserver.db",
 		},
 		Authentication: struct {
-			Realm      string `yaml:"realm"`
-			NonceExpiry int   `yaml:"nonce_expiry"`
+			Enabled     bool   `yaml:"enabled"`
+			RequireAuth bool   `yaml:"require_auth"`
+			Realm       string `yaml:"realm"`
+			NonceExpiry int    `yaml:"nonce_expiry"`
 		}{
-			Realm:      "sipserver.local",
+			Enabled:     true,
+			RequireAuth: true,
+			Realm:       "sipserver.local",
 			NonceExpiry: 300,
 		},
 		SessionTimer: struct {
-			DefaultExpires int `yaml:"default_expires"`
-			MinSE         int `yaml:"min_se"`
-			MaxSE         int `yaml:"max_se"`
+			Enabled        bool `yaml:"enabled"`
+			RequireSupport bool `yaml:"require_support"`
+			DefaultExpires int  `yaml:"default_expires"`
+			MinSE          int  `yaml:"min_se"`
+			MaxSE          int  `yaml:"max_se"`
 		}{
+			Enabled:        true,
+			RequireSupport: true,
 			DefaultExpires: 1800,
-			MinSE:         90,
-			MaxSE:         7200,
+			MinSE:          90,
+			MaxSE:          7200,
 		},
 		HuntGroups: struct {
 			Enabled         bool `yaml:"enabled"`

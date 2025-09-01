@@ -12,14 +12,18 @@ type Config struct {
 	} `yaml:"database"`
 	
 	Authentication struct {
-		Realm      string `yaml:"realm"`
-		NonceExpiry int   `yaml:"nonce_expiry"`
+		Enabled     bool   `yaml:"enabled"`
+		RequireAuth bool   `yaml:"require_auth"`
+		Realm       string `yaml:"realm"`
+		NonceExpiry int    `yaml:"nonce_expiry"`
 	} `yaml:"authentication"`
 	
 	SessionTimer struct {
-		DefaultExpires int `yaml:"default_expires"`
-		MinSE         int `yaml:"min_se"`
-		MaxSE         int `yaml:"max_se"`
+		Enabled        bool `yaml:"enabled"`
+		RequireSupport bool `yaml:"require_support"`
+		DefaultExpires int  `yaml:"default_expires"`
+		MinSE          int  `yaml:"min_se"`
+		MaxSE          int  `yaml:"max_se"`
 	} `yaml:"session_timer"`
 	
 	HuntGroups struct {
