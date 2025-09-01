@@ -22,6 +22,13 @@ type Config struct {
 		MaxSE         int `yaml:"max_se"`
 	} `yaml:"session_timer"`
 	
+	HuntGroups struct {
+		Enabled         bool `yaml:"enabled"`
+		RingTimeout     int  `yaml:"ring_timeout"`     // Timeout in seconds for each member
+		MaxConcurrent   int  `yaml:"max_concurrent"`   // Maximum concurrent calls per group
+		CallWaitingTime int  `yaml:"call_waiting_time"` // Time to wait before trying next strategy
+	} `yaml:"hunt_groups"`
+	
 	WebAdmin struct {
 		Port    int  `yaml:"port"`
 		Enabled bool `yaml:"enabled"`

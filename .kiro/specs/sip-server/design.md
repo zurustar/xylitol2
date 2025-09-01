@@ -147,12 +147,125 @@ type UserHandler struct {
     userManager UserManager
 }
 
+type HuntGroupHandler struct {
+    huntGroupManager HuntGroupManager
+}
+
 // HTTP endpoints:
 // GET /admin/users - List all users
 // POST /admin/users - Create new user
 // PUT /admin/users/{id} - Update user
 // DELETE /admin/users/{id} - Delete user
+// GET /admin/huntgroups - List all hunt groups
+// POST /admin/huntgroups - Create new hunt group
+// PUT /admin/huntgroups/{id} - Update hunt group
+// DELETE /admin/huntgroups/{id} - Delete hunt group
 // GET /admin - Admin dashboard
+```
+
+### Hunt Group Manager
+```go
+type HuntGroupManager interface {
+    CreateHuntGroup(hg *HuntGroup) error
+    GetHuntGroup(id string) (*HuntGroup, error)
+    GetHuntGroupByExtension(extension string) (*HuntGroup, error)
+    UpdateHuntGroup(id string, hg *HuntGroup) error
+    DeleteHuntGroup(id string) error
+    ListHuntGroups() ([]*HuntGroup, error)
+    EnableHuntGroup(id string) error
+    DisableHuntGroup(id string) error
+}
+
+type HuntGroup struct {
+    ID          string
+    Name        string
+    Extension   string
+    Description string
+    Strategy    HuntStrategy
+    Timeout     time.Duration
+    Enabled     bool
+    Members     []HuntGroupMember
+    CreatedAt   time.Time
+    UpdatedAt   time.Time
+}
+
+type HuntGroupMember struct {
+    ID          string
+    URI         string
+    DisplayName string
+    Priority    int
+    Timeout     time.Duration
+    Enabled     bool
+}
+
+type HuntStrategy int
+const (
+    HuntStrategyParallel HuntStrategy = iota
+    HuntStrategySequential
+    HuntStrategyRoundRobin
+)
+```
+
+### B2BUA (Back-to-Back User Agent)
+```go
+type B2BUA interface {
+    HandleIncomingInvite(req *SIPMessage, remoteAddr net.Addr) error
+    HandleIncomingResponse(resp *SIPMessage, remoteAddr net.Addr) error
+    HandleIncomingBye(req *SIPMessage, remoteAddr net.Addr) error
+    HandleIncomingCancel(req *SIPMessage, remoteAddr net.Addr) error
+    CreateSession(callID string, huntGroup *HuntGroup) *B2BUASession
+    TerminateSession(sessionID string, reason string) error
+    GetActiveSessions() []*B2BUASession
+}
+
+type B2BUASession struct {
+    ID            string
+    CallID        string
+    State         SessionState
+    HuntGroupID   string
+    CallerLeg     *CallLeg
+    CalleeLeg     *CallLeg
+    PendingLegs   map[string]*CallLeg
+    AnsweredLegID string
+    CreatedAt     time.Time
+    AnsweredAt    *time.Time
+}
+
+type CallLeg struct {
+    ID         string
+    CallID     string
+    FromTag    string
+    ToTag      string
+    Contact    string
+    RemoteURI  string
+    LocalURI   string
+    State      LegState
+    RemoteAddr net.Addr
+    LocalSDP   string
+    RemoteSDP  string
+    LastCSeq   uint32
+}
+
+type SessionState int
+const (
+    SessionStateInitial SessionState = iota
+    SessionStateInviting
+    SessionStateRinging
+    SessionStateAnswered
+    SessionStateTerminating
+    SessionStateTerminated
+)
+
+type LegState int
+const (
+    LegStateInitial LegState = iota
+    LegStateInviting
+    LegStateProceeding
+    LegStateRinging
+    LegStateAnswered
+    LegStateTerminating
+    LegStateTerminated
+)
 ```
 
 ### Session Timer Manager
@@ -230,6 +343,40 @@ CREATE TABLE contacts (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     INDEX(aor),
     INDEX(expires)
+);
+```
+
+#### Hunt Groups Table
+```sql
+CREATE TABLE hunt_groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    extension TEXT UNIQUE NOT NULL,
+    description TEXT,
+    strategy TEXT NOT NULL DEFAULT 'parallel',
+    timeout INTEGER NOT NULL DEFAULT 30,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    members TEXT NOT NULL, -- JSON array of members
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### Hunt Group Calls Table (for statistics)
+```sql
+CREATE TABLE hunt_group_calls (
+    id TEXT PRIMARY KEY,
+    hunt_group_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    caller_uri TEXT NOT NULL,
+    caller_name TEXT,
+    status TEXT NOT NULL,
+    answered_by TEXT,
+    answered_at DATETIME,
+    duration INTEGER, -- seconds
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (hunt_group_id) REFERENCES hunt_groups(id)
 );
 ```
 
@@ -403,6 +550,113 @@ type ErrorResponseBuilder struct {
 - **500 Internal Server Error**: サーバー内部エラー
 - **503 Service Unavailable**: サーバー過負荷
 
+### Enhanced Message Validation Chain
+```go
+type MessageProcessor interface {
+    ProcessRequest(req *SIPMessage) (*SIPMessage, error)
+}
+
+type ValidationChain struct {
+    validators []RequestValidator
+}
+
+type RequestValidator interface {
+    Validate(req *SIPMessage) ValidationResult
+    Priority() int
+    Name() string
+}
+
+type ValidationResult struct {
+    Valid       bool
+    ErrorCode   int
+    ErrorReason string
+    Details     string
+    ShouldStop  bool
+}
+
+type SessionTimerValidator struct{}
+type AuthenticationValidator struct{}
+type SyntaxValidator struct{}
+type HeaderValidator struct{}
+```
+
+### Enhanced TCP Connection Management
+```go
+type TCPConnectionManager struct {
+    connections map[string]*TCPConnection
+    readTimeout time.Duration
+    writeTimeout time.Duration
+    idleTimeout time.Duration
+    maxConnections int
+    mu sync.RWMutex
+}
+
+type TCPConnection struct {
+    conn net.Conn
+    reader *bufio.Reader
+    writer *bufio.Writer
+    lastActivity time.Time
+    messageBuffer []byte
+    id string
+    remoteAddr net.Addr
+    state ConnectionState
+}
+
+type TCPMessageFramer interface {
+    ReadMessage(conn *TCPConnection) (*SIPMessage, error)
+    WriteMessage(conn *TCPConnection, msg *SIPMessage) error
+    HandlePartialMessage(conn *TCPConnection, data []byte) error
+}
+
+type ConnectionState int
+const (
+    ConnectionStateNew ConnectionState = iota
+    ConnectionStateActive
+    ConnectionStateIdle
+    ConnectionStateClosing
+    ConnectionStateClosed
+)
+```
+
+### Enhanced Error Handling System
+```go
+type ErrorHandler interface {
+    HandleParseError(err error, rawMessage []byte) *SIPMessage
+    HandleValidationError(err ValidationError, req *SIPMessage) *SIPMessage
+    HandleProcessingError(err error, req *SIPMessage) *SIPMessage
+    HandleTimeoutError(err error, req *SIPMessage) *SIPMessage
+}
+
+type ValidationError struct {
+    Code        int
+    Reason      string
+    Header      string
+    Details     string
+    Suggestions []string
+    Context     map[string]interface{}
+}
+
+type ErrorResponseBuilder struct {
+    templates map[int]ResponseTemplate
+}
+
+type ResponseTemplate struct {
+    StatusCode   int
+    ReasonPhrase string
+    Headers      map[string]string
+    BodyTemplate string
+}
+
+type ErrorStatistics struct {
+    ParseErrors      int64
+    ValidationErrors int64
+    TimeoutErrors    int64
+    TCPErrors        int64
+    LastErrorTime    time.Time
+    ErrorsByType     map[string]int64
+}
+```
+
 ## 6. 実装優先順位
 
 ### Phase 1: Session-Timer優先順位修正
@@ -419,3 +673,9 @@ type ErrorResponseBuilder struct {
 1. ErrorHandlerインターフェースの実装
 2. 詳細なエラーレスポンス生成
 3. エラーログの改善
+
+### Phase 4: Hunt Group機能実装
+1. Hunt Groupデータベースモデルの実装
+2. B2BUA機能の実装
+3. Parallel Forkingロジックの実装
+4. Web管理インターフェースの実装

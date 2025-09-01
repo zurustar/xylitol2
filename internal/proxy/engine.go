@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/zurustar/xylitol2/internal/database"
+	"github.com/zurustar/xylitol2/internal/huntgroup"
 	"github.com/zurustar/xylitol2/internal/parser"
 	"github.com/zurustar/xylitol2/internal/registrar"
 	"github.com/zurustar/xylitol2/internal/transaction"
@@ -20,6 +21,8 @@ type RequestForwardingEngine struct {
 	transportManager  transport.TransportManager
 	transactionManager transaction.TransactionManager
 	parser            parser.MessageParser
+	huntGroupManager  huntgroup.HuntGroupManager
+	huntGroupEngine   huntgroup.HuntGroupEngine
 	serverHost        string
 	serverPort        int
 	maxForwards       int
@@ -31,6 +34,8 @@ func NewRequestForwardingEngine(
 	transportManager transport.TransportManager,
 	transactionManager transaction.TransactionManager,
 	parser parser.MessageParser,
+	huntGroupManager huntgroup.HuntGroupManager,
+	huntGroupEngine huntgroup.HuntGroupEngine,
 	serverHost string,
 	serverPort int,
 ) *RequestForwardingEngine {
@@ -39,6 +44,8 @@ func NewRequestForwardingEngine(
 		transportManager:   transportManager,
 		transactionManager: transactionManager,
 		parser:             parser,
+		huntGroupManager:   huntGroupManager,
+		huntGroupEngine:    huntGroupEngine,
 		serverHost:         serverHost,
 		serverPort:         serverPort,
 		maxForwards:        70, // RFC3261 default
@@ -85,9 +92,13 @@ func (e *RequestForwardingEngine) processProxyableRequest(req *parser.SIPMessage
 		return e.sendBadRequest(req, transaction, "Missing Request-URI")
 	}
 
-	// Resolve target using registrar database
+	// Resolve target using registrar database or hunt groups
 	targets, err := e.resolveTarget(requestURI)
 	if err != nil {
+		// Check if this is a hunt group error
+		if strings.HasPrefix(err.Error(), "hunt_group:") {
+			return e.handleHuntGroupCall(req, transaction, err.Error())
+		}
 		return e.sendNotFound(req, transaction, "User not registered")
 	}
 
@@ -191,12 +202,23 @@ func (e *RequestForwardingEngine) ProcessResponse(resp *parser.SIPMessage, trans
 	return e.transportManager.SendMessage(data, transport, targetAddr)
 }
 
-// resolveTarget resolves a target URI using the registrar database
+// resolveTarget resolves a target URI using the registrar database or hunt groups
 func (e *RequestForwardingEngine) resolveTarget(requestURI string) ([]*database.RegistrarContact, error) {
 	// Extract AOR from Request-URI
 	aor, err := e.extractAOR(requestURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract AOR from Request-URI: %w", err)
+	}
+
+	// Extract extension from AOR (simplified - assumes sip:extension@domain format)
+	extension := e.extractExtensionFromAOR(aor)
+	
+	// Check if this is a hunt group extension
+	if e.huntGroupManager != nil && extension != "" {
+		if group, err := e.huntGroupManager.GetGroupByExtension(extension); err == nil && group != nil {
+			// This is a hunt group - return empty contacts to indicate special handling needed
+			return nil, fmt.Errorf("hunt_group:%d", group.ID)
+		}
 	}
 
 	// Find registered contacts
@@ -505,4 +527,69 @@ func (e *RequestForwardingEngine) copyRequiredHeaders(request, response *parser.
 	
 	// Set Content-Length to 0 for responses without body
 	response.SetHeader(parser.HeaderContentLength, "0")
+}
+
+// extractExtensionFromAOR extracts the extension part from an AOR
+func (e *RequestForwardingEngine) extractExtensionFromAOR(aor string) string {
+	// Remove sip: or sips: scheme
+	if strings.HasPrefix(aor, "sip:") {
+		aor = aor[4:]
+	} else if strings.HasPrefix(aor, "sips:") {
+		aor = aor[5:]
+	}
+	
+	// Extract user part (before @)
+	if idx := strings.Index(aor, "@"); idx >= 0 {
+		return aor[:idx]
+	}
+	
+	return aor
+}
+
+// handleHuntGroupCall handles incoming calls to hunt groups
+func (e *RequestForwardingEngine) handleHuntGroupCall(req *parser.SIPMessage, transaction transaction.Transaction, huntGroupError string) error {
+	if e.huntGroupEngine == nil {
+		return e.sendNotFound(req, transaction, "Hunt group service not available")
+	}
+
+	// Extract hunt group ID from error message
+	parts := strings.Split(huntGroupError, ":")
+	if len(parts) != 2 {
+		return e.sendNotFound(req, transaction, "Invalid hunt group reference")
+	}
+
+	groupID, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return e.sendNotFound(req, transaction, "Invalid hunt group ID")
+	}
+
+	// Get hunt group
+	group, err := e.huntGroupManager.GetGroup(groupID)
+	if err != nil {
+		return e.sendNotFound(req, transaction, "Hunt group not found")
+	}
+
+	// Only handle INVITE requests for hunt groups
+	if req.GetMethod() != parser.MethodINVITE {
+		return e.sendMethodNotAllowed(req, transaction)
+	}
+
+	// Process the hunt group call
+	_, err = e.huntGroupEngine.ProcessIncomingCall(req, group)
+	if err != nil {
+		return e.sendServerError(req, transaction, "Hunt group processing failed")
+	}
+
+	// For now, send 100 Trying response
+	// In a full implementation, this would be handled by the B2BUA
+	response := parser.NewResponseMessage(100, "Trying")
+	e.copyRequiredHeaders(req, response)
+	return transaction.SendResponse(response)
+}
+
+// sendServerError sends a 500 Internal Server Error response
+func (e *RequestForwardingEngine) sendServerError(req *parser.SIPMessage, transaction transaction.Transaction, reason string) error {
+	response := parser.NewResponseMessage(500, reason)
+	e.copyRequiredHeaders(req, response)
+	return transaction.SendResponse(response)
 }

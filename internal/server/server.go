@@ -234,19 +234,41 @@ func (s *SIPServerImpl) initializeComponents() error {
 	)
 	s.logger.Info("Session timer manager initialized")
 	
-	// 9. Initialize proxy engine (placeholder - will be implemented in task 10)
-	// s.proxyEngine = proxy.NewProxyEngine(s.registrar, s.transactionManager, s.logger)
+	// 9. Initialize proxy engine
+	s.proxyEngine = proxy.NewRequestForwardingEngine(
+		s.registrar,
+		s.transportManager,
+		s.transactionManager,
+		s.messageParser,
+		nil, // huntGroupManager - not implemented yet
+		nil, // huntGroupEngine - not implemented yet
+		"localhost",
+		s.config.Server.UDPPort,
+	)
 	
-	// 10. Initialize handler manager
-	s.handlerManager = handlers.NewHandlerManager(
+	// 10. Initialize validated handler manager with validation chain
+	validatedManager := handlers.NewValidatedManager()
+	
+	// Set up the validation chain with default validators
+	validationConfig := handlers.DefaultValidationConfig()
+	validatedManager.SetupDefaultValidators(validationConfig)
+	
+	// Set the underlying handler manager
+	validatedManager.Manager = handlers.NewManager()
+	
+	// Register method handlers
+	s.setupMethodHandlers(validatedManager.Manager)
+	
+	// Create transport adapter to bridge ValidatedManager with transport.MessageHandler
+	transportAdapter := handlers.NewTransportAdapter(
+		validatedManager,
 		s.messageParser,
 		s.transactionManager,
-		s.authProcessor,
-		s.registrar,
-		s.sessionTimerMgr,
 		s.logger,
 	)
-	s.logger.Info("Handler manager initialized")
+	
+	s.handlerManager = transportAdapter
+	s.logger.Info("Validated handler manager initialized with validation chain")
 	
 	// 11. Initialize transport manager
 	s.transportManager = transport.NewManager()
@@ -350,6 +372,21 @@ func (s *SIPServerImpl) sessionTimerCleanupRoutine() {
 			s.sessionTimerMgr.CleanupExpiredSessions()
 		}
 	}
+}
+
+// setupMethodHandlers registers method handlers with the handler manager
+func (s *SIPServerImpl) setupMethodHandlers(manager *handlers.Manager) {
+	// Register REGISTER handler
+	registerHandler := handlers.NewRegisterHandler(s.registrar, s.logger)
+	manager.RegisterHandler(registerHandler)
+	
+	// Register session handler for INVITE, ACK, BYE
+	sessionHandler := handlers.NewSessionHandler(s.proxyEngine, s.registrar, s.sessionTimerMgr)
+	manager.RegisterHandler(sessionHandler)
+	
+	// Register auxiliary handler for OPTIONS and INFO
+	auxHandler := handlers.NewAuxiliaryHandler(s.proxyEngine, s.registrar)
+	manager.RegisterHandler(auxHandler)
 }
 
 // cleanup performs resource cleanup

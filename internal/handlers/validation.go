@@ -96,10 +96,14 @@ type ValidationError struct {
 	Header        string
 	Details       string
 	Suggestions   []string
+	Context       map[string]interface{}
 }
 
 // Error implements the error interface
 func (ve *ValidationError) Error() string {
+	if ve.Details != "" {
+		return fmt.Sprintf("validation failed in %s: %s - %s", ve.ValidatorName, ve.Reason, ve.Details)
+	}
 	return fmt.Sprintf("validation failed in %s: %s", ve.ValidatorName, ve.Reason)
 }
 

@@ -7,27 +7,39 @@ import (
 	"time"
 
 	"github.com/zurustar/xylitol2/internal/database"
+	"github.com/zurustar/xylitol2/internal/huntgroup"
 	"github.com/zurustar/xylitol2/internal/logging"
 )
 
 // Server implements the WebAdminServer interface
 type Server struct {
-	userManager database.UserManager
-	logger      logging.Logger
-	server      *http.Server
-	handler     *WebUserHandler
+	userManager      database.UserManager
+	huntGroupManager huntgroup.HuntGroupManager
+	huntGroupEngine  huntgroup.HuntGroupEngine
+	logger           logging.Logger
+	server           *http.Server
+	userHandler      *WebUserHandler
+	huntGroupHandler *WebHuntGroupHandler
 }
 
 // NewServer creates a new web admin server
-func NewServer(userManager database.UserManager, logger logging.Logger) *Server {
-	handler := &WebUserHandler{
+func NewServer(userManager database.UserManager, huntGroupManager huntgroup.HuntGroupManager, huntGroupEngine huntgroup.HuntGroupEngine, logger logging.Logger) *Server {
+	userHandler := &WebUserHandler{
 		userManager: userManager,
 	}
 
+	huntGroupHandler := &WebHuntGroupHandler{
+		huntGroupManager: huntGroupManager,
+		huntGroupEngine:  huntGroupEngine,
+	}
+
 	return &Server{
-		userManager: userManager,
-		logger:      logger,
-		handler:     handler,
+		userManager:      userManager,
+		huntGroupManager: huntGroupManager,
+		huntGroupEngine:  huntGroupEngine,
+		logger:           logger,
+		userHandler:      userHandler,
+		huntGroupHandler: huntGroupHandler,
 	}
 }
 
@@ -80,17 +92,27 @@ func (s *Server) registerRoutesOnMux(mux *http.ServeMux) {
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("web/static/"))))
 
 	// Admin dashboard
-	mux.HandleFunc("/", s.handler.HandleDashboard)
-	mux.HandleFunc("/admin", s.handler.HandleDashboard)
-	mux.HandleFunc("/admin/", s.handler.HandleDashboard)
+	mux.HandleFunc("/", s.userHandler.HandleDashboard)
+	mux.HandleFunc("/admin", s.userHandler.HandleDashboard)
+	mux.HandleFunc("/admin/", s.userHandler.HandleDashboard)
 
 	// User management API endpoints
-	mux.HandleFunc("/admin/users", s.handler.HandleUsers)
-	mux.HandleFunc("/admin/users/", s.handler.HandleUserByID)
+	mux.HandleFunc("/admin/users", s.userHandler.HandleUsers)
+	mux.HandleFunc("/admin/users/", s.userHandler.HandleUserByID)
 
 	// User management pages
-	mux.HandleFunc("/admin/users/new", s.handler.HandleNewUserPage)
-	mux.HandleFunc("/admin/users/edit/", s.handler.HandleEditUserPage)
+	mux.HandleFunc("/admin/users/new", s.userHandler.HandleNewUserPage)
+	mux.HandleFunc("/admin/users/edit/", s.userHandler.HandleEditUserPage)
+
+	// Hunt Group management API endpoints
+	mux.HandleFunc("/admin/huntgroups", s.huntGroupHandler.HandleHuntGroups)
+	mux.HandleFunc("/admin/huntgroups/", s.huntGroupHandler.HandleHuntGroupByID)
+
+	// Hunt Group management pages
+	mux.HandleFunc("/admin/huntgroups/new", s.huntGroupHandler.HandleNewHuntGroupPage)
+	mux.HandleFunc("/admin/huntgroups/edit/", s.huntGroupHandler.HandleEditHuntGroupPage)
+	mux.HandleFunc("/admin/huntgroups/members/", s.huntGroupHandler.HandleHuntGroupMembers)
+	mux.HandleFunc("/admin/huntgroups/statistics/", s.huntGroupHandler.HandleHuntGroupStatistics)
 }
 
 // WebUserHandler handles HTTP requests for user management
@@ -118,6 +140,7 @@ func (h *WebUserHandler) HandleDashboard(w http.ResponseWriter, r *http.Request)
         <nav>
             <ul>
                 <li><a href="/admin/users">Manage Users</a></li>
+                <li><a href="/admin/huntgroups">Manage Hunt Groups</a></li>
             </ul>
         </nav>
         <div class="content">

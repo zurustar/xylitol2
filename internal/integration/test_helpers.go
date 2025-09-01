@@ -322,14 +322,14 @@ func (a *AuthHelper) ExtractNonce(wwwAuthHeader string) string {
 type TestScenario struct {
 	Name        string
 	Description string
-	Setup       func(*testing.T, *TestSuite)
-	Execute     func(*testing.T, *TestSuite) error
-	Verify      func(*testing.T, *TestSuite, error)
-	Cleanup     func(*testing.T, *TestSuite)
+	Setup       func(*testing.T, interface{})
+	Execute     func(*testing.T, interface{}) error
+	Verify      func(*testing.T, interface{}, error)
+	Cleanup     func(*testing.T, interface{})
 }
 
 // RunScenario executes a test scenario
-func RunScenario(t *testing.T, suite *TestSuite, scenario TestScenario) {
+func RunScenario(t *testing.T, suite interface{}, scenario TestScenario) {
 	t.Run(scenario.Name, func(t *testing.T) {
 		if scenario.Setup != nil {
 			scenario.Setup(t, suite)
@@ -386,7 +386,7 @@ type LoadTestResult struct {
 }
 
 // RunLoadTest executes a load test
-func RunLoadTest(t *testing.T, suite *TestSuite, config LoadTestConfig) LoadTestResult {
+func RunLoadTest(t *testing.T, suite interface{}, config LoadTestConfig) LoadTestResult {
 	// Implementation would go here - this is a placeholder
 	// In a real implementation, this would:
 	// 1. Create the specified number of concurrent workers

@@ -71,6 +71,19 @@ func (m *Manager) Validate(config *Config) error {
 		return fmt.Errorf("min SE too short: %d seconds (RFC4028 minimum is 90)", config.SessionTimer.MinSE)
 	}
 
+	// Validate hunt groups settings
+	if config.HuntGroups.Enabled {
+		if config.HuntGroups.RingTimeout < 5 || config.HuntGroups.RingTimeout > 300 {
+			return fmt.Errorf("invalid hunt group ring timeout: %d seconds (must be 5-300)", config.HuntGroups.RingTimeout)
+		}
+		if config.HuntGroups.MaxConcurrent < 1 || config.HuntGroups.MaxConcurrent > 100 {
+			return fmt.Errorf("invalid hunt group max concurrent: %d (must be 1-100)", config.HuntGroups.MaxConcurrent)
+		}
+		if config.HuntGroups.CallWaitingTime < 1 || config.HuntGroups.CallWaitingTime > 60 {
+			return fmt.Errorf("invalid hunt group call waiting time: %d seconds (must be 1-60)", config.HuntGroups.CallWaitingTime)
+		}
+	}
+
 	// Validate web admin port (0 is allowed for testing)
 	if config.WebAdmin.Enabled {
 		if config.WebAdmin.Port < 0 || config.WebAdmin.Port > 65535 {
@@ -129,6 +142,17 @@ func GetDefaultConfig() *Config {
 			DefaultExpires: 1800,
 			MinSE:         90,
 			MaxSE:         7200,
+		},
+		HuntGroups: struct {
+			Enabled         bool `yaml:"enabled"`
+			RingTimeout     int  `yaml:"ring_timeout"`
+			MaxConcurrent   int  `yaml:"max_concurrent"`
+			CallWaitingTime int  `yaml:"call_waiting_time"`
+		}{
+			Enabled:         false,
+			RingTimeout:     30,
+			MaxConcurrent:   10,
+			CallWaitingTime: 5,
 		},
 		WebAdmin: struct {
 			Port    int  `yaml:"port"`

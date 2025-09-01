@@ -188,7 +188,86 @@ This document outlines the requirements for implementing a SIP (Session Initiati
 - UDP transport processing
 - Basic proxy functionality
 
-### Outstanding Issues
-- Session-Timer validation priority adjustment needed
-- TCP processing timeout issues
-- Complete error handling implementation required
+### Requirement 15
+
+**User Story:** As a system administrator, I want to configure hunt groups (parallel forking) for specific extensions, so that incoming calls to a representative number can be distributed to multiple endpoints simultaneously.
+
+#### Acceptance Criteria
+
+1. WHEN an administrator creates a hunt group THEN the system SHALL store the hunt group configuration with extension, member list, and strategy settings
+2. WHEN a hunt group is configured for an extension THEN incoming calls to that extension SHALL be forked to all enabled members simultaneously
+3. WHEN multiple hunt group members are called THEN the system SHALL implement "first answer wins" logic
+4. WHEN one hunt group member answers THEN the system SHALL immediately cancel calls to all other members
+5. IF all hunt group members are busy or unavailable THEN the system SHALL respond with appropriate error status
+
+### Requirement 16
+
+**User Story:** As a SIP client calling a hunt group extension, I want the call to be connected to the first available member, so that I can reach someone without knowing individual extensions.
+
+#### Acceptance Criteria
+
+1. WHEN calling a hunt group extension THEN the system SHALL simultaneously send INVITE requests to all enabled members
+2. WHEN a hunt group member sends a provisional response (180 Ringing) THEN the system SHALL forward it to the caller
+3. WHEN the first member answers (200 OK) THEN the system SHALL establish the session with that member
+4. WHEN a session is established THEN the system SHALL send CANCEL requests to all other pending invitations
+5. IF no member answers within the timeout period THEN the system SHALL respond with 408 Request Timeout
+
+### Requirement 17
+
+**User Story:** As a system administrator, I want to manage hunt group configurations through the web interface, so that I can easily add, modify, and remove hunt groups without direct database access.
+
+#### Acceptance Criteria
+
+1. WHEN accessing the web admin interface THEN administrators SHALL see a hunt group management section
+2. WHEN creating a hunt group THEN administrators SHALL be able to specify extension, name, members, and timeout settings
+3. WHEN managing hunt group members THEN administrators SHALL be able to add, remove, and enable/disable individual members
+4. WHEN viewing hunt groups THEN administrators SHALL see current status and call statistics
+5. IF hunt group operations fail THEN appropriate error messages SHALL be displayed in the web interface
+
+### Requirement 18
+
+**User Story:** As a SIP server implementing B2BUA functionality, I want to properly handle SDP negotiation and media routing for hunt group calls, so that audio/video sessions work correctly through the proxy.
+
+#### Acceptance Criteria
+
+1. WHEN processing hunt group calls THEN the system SHALL act as a Back-to-Back User Agent (B2BUA)
+2. WHEN handling SDP offers THEN the system SHALL properly relay and modify SDP between caller and answering member
+3. WHEN a hunt group member answers THEN the system SHALL establish separate SIP dialogs with caller and answering member
+4. WHEN managing call state THEN the system SHALL maintain proper transaction and dialog state for both legs
+5. IF SDP negotiation fails THEN the system SHALL terminate the call with appropriate error response
+
+### Requirement 19
+
+**User Story:** As a SIP server, I want to validate Session-Timer requirements before authentication challenges, so that RFC4028 compliance is properly enforced according to specification priority.
+
+#### Acceptance Criteria
+
+1. WHEN processing INVITE requests THEN the server SHALL validate Session-Timer headers before authentication when appropriate
+2. WHEN Session-Timer validation fails THEN the server SHALL respond with 421 Extension Required before authentication challenges
+3. WHEN both Session-Timer and authentication are required THEN the server SHALL prioritize based on RFC compliance requirements
+4. WHEN Session-Timer validation passes THEN the server SHALL proceed with authentication flow
+5. IF Session-Timer validation conflicts with authentication flow THEN the server SHALL follow RFC4028 precedence rules
+
+### Requirement 20
+
+**User Story:** As a SIP client using TCP transport, I want reliable message processing without timeouts, so that my TCP-based SIP communications work consistently.
+
+#### Acceptance Criteria
+
+1. WHEN sending SIP messages over TCP THEN the server SHALL process them without timeout errors
+2. WHEN TCP connections are established THEN the server SHALL maintain them properly for the duration of message exchanges
+3. WHEN TCP message framing occurs THEN the server SHALL handle partial messages and reassembly correctly
+4. WHEN TCP connections are idle THEN the server SHALL manage connection lifecycle appropriately
+5. IF TCP processing errors occur THEN the server SHALL log detailed error information and recover gracefully
+
+### Requirement 21
+
+**User Story:** As a SIP server, I want to handle malformed and invalid SIP messages with appropriate error responses, so that clients receive clear feedback about message problems.
+
+#### Acceptance Criteria
+
+1. WHEN receiving malformed SIP messages THEN the server SHALL respond with 400 Bad Request with descriptive error details
+2. WHEN receiving messages with invalid headers THEN the server SHALL identify the specific header problem in the response
+3. WHEN receiving messages with missing required headers THEN the server SHALL respond with 400 Bad Request specifying missing headers
+4. WHEN receiving messages with invalid method names THEN the server SHALL respond with 405 Method Not Allowed
+5. IF message parsing fails completely THEN the server SHALL log the error and attempt to send a generic 400 response

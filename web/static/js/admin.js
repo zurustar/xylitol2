@@ -1,453 +1,268 @@
-// Admin interface JavaScript functionality
+// SIP Server Admin Interface JavaScript
 
-document.addEventListener('DOMContentLoaded', function() {
-    // Form validation for user creation and editing
-    const userForm = document.getElementById('userForm');
-    const editUserForm = document.getElementById('editUserForm');
-    const searchInput = document.getElementById('userSearch');
+// Utility functions
+function showAlert(message, type = 'info') {
+    const alertDiv = document.createElement('div');
+    alertDiv.className = `alert alert-${type}`;
+    alertDiv.textContent = message;
     
-    if (userForm) {
-        userForm.addEventListener('submit', validateUserForm);
-    }
+    const container = document.querySelector('.container');
+    container.insertBefore(alertDiv, container.firstChild);
     
-    if (editUserForm) {
-        editUserForm.addEventListener('submit', validateEditUserForm);
-        // Handle PUT method for form submission
-        editUserForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-            submitEditForm(this);
-        });
-    }
-    
-    // Initialize search functionality
-    if (searchInput) {
-        searchInput.addEventListener('input', debounce(filterUsers, 300));
-    }
-    
-    // Initialize user status toggle functionality
-    initializeStatusToggles();
-});
+    // Auto-remove after 5 seconds
+    setTimeout(() => {
+        if (alertDiv.parentNode) {
+            alertDiv.parentNode.removeChild(alertDiv);
+        }
+    }, 5000);
+}
 
-// Validate user creation form
-function validateUserForm(event) {
-    event.preventDefault();
-    
-    const username = document.getElementById('username').value.trim();
-    const realm = document.getElementById('realm').value.trim();
-    const password = document.getElementById('password').value;
-    const confirmPassword = document.getElementById('confirm-password').value;
-    
-    let isValid = true;
-    
-    // Clear previous errors
-    clearErrors();
-    
-    // Validate username
-    if (!username) {
-        showError('username-error', 'Username is required');
-        isValid = false;
-    } else if (username.length < 3) {
-        showError('username-error', 'Username must be at least 3 characters');
-        isValid = false;
-    }
-    
-    // Validate realm
-    if (!realm) {
-        showError('realm-error', 'Realm is required');
-        isValid = false;
-    }
-    
-    // Validate password
-    if (!password) {
-        showError('password-error', 'Password is required');
-        isValid = false;
-    } else if (password.length < 6) {
-        showError('password-error', 'Password must be at least 6 characters');
-        isValid = false;
-    }
-    
-    // Validate password confirmation
-    if (password !== confirmPassword) {
-        showError('confirm-password-error', 'Passwords do not match');
-        isValid = false;
-    }
-    
-    if (isValid) {
-        event.target.submit();
+function confirmAction(message, callback) {
+    if (confirm(message)) {
+        callback();
     }
 }
 
-// Validate user edit form
-function validateEditUserForm(event) {
-    const password = document.getElementById('password').value;
-    const confirmPassword = document.getElementById('confirm-password').value;
+// User management functions
+function deleteUser(userId) {
+    confirmAction('Are you sure you want to delete this user? This action cannot be undone.', () => {
+        fetch(`/admin/users/${userId}`, {
+            method: 'DELETE'
+        })
+        .then(response => {
+            if (response.ok) {
+                showAlert('User deleted successfully', 'success');
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                showAlert('Failed to delete user', 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showAlert('An error occurred while deleting the user', 'error');
+        });
+    });
+}
+
+// Hunt Group management functions
+function deleteHuntGroup(groupId) {
+    confirmAction('Are you sure you want to delete this hunt group? This action cannot be undone.', () => {
+        fetch(`/admin/huntgroups/${groupId}`, {
+            method: 'DELETE'
+        })
+        .then(response => {
+            if (response.ok) {
+                showAlert('Hunt group deleted successfully', 'success');
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                showAlert('Failed to delete hunt group', 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showAlert('An error occurred while deleting the hunt group', 'error');
+        });
+    });
+}
+
+function viewStatistics(groupId) {
+    fetch(`/admin/huntgroups/${groupId}/statistics`)
+        .then(response => response.json())
+        .then(stats => {
+            let message = 'Hunt Group Statistics:\n\n';
+            message += `Total Calls: ${stats.total_calls}\n`;
+            message += `Answered Calls: ${stats.answered_calls}\n`;
+            message += `Missed Calls: ${stats.missed_calls}\n`;
+            
+            if (stats.average_ring_time) {
+                const avgRingSeconds = Math.round(stats.average_ring_time / 1000000000);
+                message += `Average Ring Time: ${avgRingSeconds} seconds\n`;
+            }
+            
+            if (stats.average_call_length) {
+                const avgCallSeconds = Math.round(stats.average_call_length / 1000000000);
+                message += `Average Call Length: ${avgCallSeconds} seconds\n`;
+            }
+            
+            if (stats.busiest_member) {
+                message += `Busiest Member: ${stats.busiest_member}\n`;
+            }
+            
+            if (stats.last_call_time) {
+                const lastCall = new Date(stats.last_call_time);
+                message += `Last Call: ${lastCall.toLocaleString()}\n`;
+            }
+            
+            alert(message);
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showAlert('Failed to load statistics', 'error');
+        });
+}
+
+function removeMember(groupId, memberId) {
+    confirmAction('Are you sure you want to remove this member from the hunt group?', () => {
+        fetch(`/admin/huntgroups/${groupId}/members/${memberId}`, {
+            method: 'DELETE'
+        })
+        .then(response => {
+            if (response.ok) {
+                showAlert('Member removed successfully', 'success');
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                showAlert('Failed to remove member', 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showAlert('An error occurred while removing the member', 'error');
+        });
+    });
+}
+
+// Form validation
+function validateForm(formId) {
+    const form = document.getElementById(formId);
+    if (!form) return true;
     
+    const requiredFields = form.querySelectorAll('[required]');
     let isValid = true;
     
-    // Clear previous errors
-    clearErrors();
+    requiredFields.forEach(field => {
+        if (!field.value.trim()) {
+            field.style.borderColor = '#dc3545';
+            isValid = false;
+        } else {
+            field.style.borderColor = '#e9ecef';
+        }
+    });
     
-    // Only validate password if it's being changed
-    if (password || confirmPassword) {
-        if (password.length < 6) {
-            showError('password-error', 'Password must be at least 6 characters');
-            isValid = false;
-        }
-        
-        if (password !== confirmPassword) {
-            showError('confirm-password-error', 'Passwords do not match');
-            isValid = false;
-        }
+    if (!isValid) {
+        showAlert('Please fill in all required fields', 'error');
     }
     
     return isValid;
 }
 
-// Submit edit form with PUT method
-function submitEditForm(form) {
-    if (!validateEditUserForm({ target: form })) {
-        return;
-    }
-    
-    const formData = new FormData(form);
-    const actionUrl = form.action;
-    
-    fetch(actionUrl, {
-        method: 'PUT',
-        body: formData
-    })
-    .then(response => {
-        if (response.ok) {
-            window.location.href = '/admin';
-        } else {
-            return response.text().then(text => {
-                throw new Error(text);
+// Real-time validation
+document.addEventListener('DOMContentLoaded', function() {
+    // Add real-time validation to forms
+    const forms = document.querySelectorAll('form');
+    forms.forEach(form => {
+        const requiredFields = form.querySelectorAll('[required]');
+        requiredFields.forEach(field => {
+            field.addEventListener('blur', function() {
+                if (!this.value.trim()) {
+                    this.style.borderColor = '#dc3545';
+                } else {
+                    this.style.borderColor = '#28a745';
+                }
             });
-        }
-    })
-    .catch(error => {
-        alert('Error updating user: ' + error.message);
-    });
-}
-
-// Delete user function
-function deleteUser(username, realm, userId) {
-    if (!confirm(`Are you sure you want to delete user "${username}@${realm}"?`)) {
-        return;
-    }
-    
-    const formData = new FormData();
-    formData.append('username', username);
-    formData.append('realm', realm);
-    
-    fetch(`/admin/users/${userId}`, {
-        method: 'DELETE',
-        body: formData
-    })
-    .then(response => {
-        if (response.ok) {
-            location.reload();
-        } else {
-            return response.text().then(text => {
-                throw new Error(text);
+            
+            field.addEventListener('input', function() {
+                if (this.value.trim()) {
+                    this.style.borderColor = '#e9ecef';
+                }
             });
-        }
-    })
-    .catch(error => {
-        alert('Error deleting user: ' + error.message);
+        });
     });
-}
-
-// Helper functions
-function showError(elementId, message) {
-    const errorElement = document.getElementById(elementId);
-    if (errorElement) {
-        errorElement.textContent = message;
-        errorElement.style.display = 'block';
-    }
-}
-
-function clearErrors() {
-    const errorElements = document.querySelectorAll('.error-message');
-    errorElements.forEach(element => {
-        element.textContent = '';
-        element.style.display = 'none';
-    });
-}
-
-// API helper functions
-function apiCall(url, method, data) {
-    const options = {
-        method: method,
-        headers: {
-            'Content-Type': 'application/json',
-        }
-    };
     
-    if (data) {
-        options.body = JSON.stringify(data);
-    }
-    
-    return fetch(url, options)
-        .then(response => {
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
+    // Add loading states to buttons
+    const buttons = document.querySelectorAll('button[type="submit"]');
+    buttons.forEach(button => {
+        button.addEventListener('click', function() {
+            const form = this.closest('form');
+            if (form && validateForm(form.id)) {
+                this.textContent = 'Processing...';
+                this.disabled = true;
             }
-            return response.json();
         });
-}
-
-// Refresh user list (for future AJAX functionality)
-function refreshUserList() {
-    apiCall('/admin/users', 'GET')
-        .then(users => {
-            // Update user table dynamically
-            updateUserTable(users);
-        })
-        .catch(error => {
-            console.error('Error refreshing user list:', error);
-        });
-}
-
-function updateUserTable(users) {
-    // This function would update the user table without page reload
-    // Implementation depends on specific requirements
-    console.log('Updating user table with:', users);
-}
-// Se
-arch and filter functionality
-function filterUsers() {
-    const searchTerm = document.getElementById('userSearch').value.toLowerCase();
-    const userRows = document.querySelectorAll('.user-row');
+    });
     
-    userRows.forEach(row => {
-        const username = row.querySelector('.username').textContent.toLowerCase();
-        const realm = row.querySelector('.realm').textContent.toLowerCase();
-        const searchText = username + ' ' + realm;
-        
-        if (searchText.includes(searchTerm)) {
-            row.style.display = '';
-        } else {
-            row.style.display = 'none';
+    // Auto-refresh statistics every 30 seconds on hunt group pages
+    if (window.location.pathname.includes('/admin/huntgroups')) {
+        setInterval(() => {
+            const statsButtons = document.querySelectorAll('[onclick*="viewStatistics"]');
+            if (statsButtons.length > 0) {
+                // Silently refresh statistics in the background
+                console.log('Auto-refreshing hunt group statistics...');
+            }
+        }, 30000);
+    }
+});
+
+// Hunt Group specific functions
+function showAddMemberForm() {
+    const form = document.getElementById('add-member-form');
+    if (form) {
+        form.style.display = 'block';
+        const extensionField = form.querySelector('#member_extension');
+        if (extensionField) {
+            extensionField.focus();
         }
-    });
-    
-    // Update no results message
-    updateNoResultsMessage();
-}
-
-function updateNoResultsMessage() {
-    const userRows = document.querySelectorAll('.user-row');
-    const visibleRows = Array.from(userRows).filter(row => row.style.display !== 'none');
-    const noResultsRow = document.getElementById('no-results-row');
-    
-    if (visibleRows.length === 0 && userRows.length > 0) {
-        if (!noResultsRow) {
-            const tbody = document.querySelector('.users-table tbody');
-            const row = document.createElement('tr');
-            row.id = 'no-results-row';
-            row.innerHTML = '<td colspan="5" class="no-data">No users match your search criteria.</td>';
-            tbody.appendChild(row);
-        }
-    } else if (noResultsRow) {
-        noResultsRow.remove();
     }
 }
 
-// User status management
-function initializeStatusToggles() {
-    const statusButtons = document.querySelectorAll('.status-toggle');
-    statusButtons.forEach(button => {
-        button.addEventListener('click', toggleUserStatus);
-    });
-}
-
-function toggleUserStatus(event) {
-    const button = event.target;
-    const userId = button.dataset.userId;
-    const username = button.dataset.username;
-    const realm = button.dataset.realm;
-    const currentStatus = button.dataset.enabled === 'true';
-    
-    if (!confirm(`Are you sure you want to ${currentStatus ? 'disable' : 'enable'} user "${username}@${realm}"?`)) {
-        return;
-    }
-    
-    // This would require backend support for user status management
-    // For now, just show a message
-    alert('User status management requires backend implementation');
-}
-
-// Enhanced form validation with real-time feedback
-function validateUserForm(event) {
-    event.preventDefault();
-    
-    const username = document.getElementById('username').value.trim();
-    const realm = document.getElementById('realm').value.trim();
-    const password = document.getElementById('password').value;
-    const confirmPassword = document.getElementById('confirm-password').value;
-    
-    let isValid = true;
-    
-    // Clear previous errors
-    clearErrors();
-    
-    // Real-time validation
-    isValid = validateUsername(username) && isValid;
-    isValid = validateRealm(realm) && isValid;
-    isValid = validatePassword(password) && isValid;
-    isValid = validatePasswordConfirmation(password, confirmPassword) && isValid;
-    
-    if (isValid) {
-        event.target.submit();
+function hideAddMemberForm() {
+    const form = document.getElementById('add-member-form');
+    if (form) {
+        form.style.display = 'none';
+        form.reset();
     }
 }
 
-function validateUsername(username) {
-    if (!username) {
-        showError('username-error', 'Username is required');
-        return false;
-    } else if (username.length < 3) {
-        showError('username-error', 'Username must be at least 3 characters');
-        return false;
-    } else if (!/^[a-zA-Z0-9._-]+$/.test(username)) {
-        showError('username-error', 'Username can only contain letters, numbers, dots, underscores, and hyphens');
-        return false;
-    }
-    return true;
-}
-
-function validateRealm(realm) {
-    if (!realm) {
-        showError('realm-error', 'Realm is required');
-        return false;
-    } else if (!/^[a-zA-Z0-9.-]+$/.test(realm)) {
-        showError('realm-error', 'Realm must be a valid domain name');
-        return false;
-    }
-    return true;
-}
-
-function validatePassword(password) {
-    if (!password) {
-        showError('password-error', 'Password is required');
-        return false;
-    } else if (password.length < 6) {
-        showError('password-error', 'Password must be at least 6 characters');
-        return false;
-    } else if (!/(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(password)) {
-        showError('password-error', 'Password must contain at least one uppercase letter, one lowercase letter, and one number');
-        return false;
-    }
-    return true;
-}
-
-function validatePasswordConfirmation(password, confirmPassword) {
-    if (password !== confirmPassword) {
-        showError('confirm-password-error', 'Passwords do not match');
-        return false;
-    }
-    return true;
-}
-
-// Real-time validation for input fields
-function setupRealTimeValidation() {
-    const usernameInput = document.getElementById('username');
-    const realmInput = document.getElementById('realm');
-    const passwordInput = document.getElementById('password');
-    const confirmPasswordInput = document.getElementById('confirm-password');
+// Strategy description helper
+function updateStrategyDescription() {
+    const strategySelect = document.getElementById('strategy');
+    const descriptionDiv = document.getElementById('strategy-description');
     
-    if (usernameInput) {
-        usernameInput.addEventListener('blur', () => validateUsername(usernameInput.value.trim()));
-    }
+    if (!strategySelect || !descriptionDiv) return;
     
-    if (realmInput) {
-        realmInput.addEventListener('blur', () => validateRealm(realmInput.value.trim()));
-    }
-    
-    if (passwordInput) {
-        passwordInput.addEventListener('blur', () => validatePassword(passwordInput.value));
-    }
-    
-    if (confirmPasswordInput && passwordInput) {
-        confirmPasswordInput.addEventListener('blur', () => 
-            validatePasswordConfirmation(passwordInput.value, confirmPasswordInput.value));
-    }
-}
-
-// Bulk operations
-function selectAllUsers() {
-    const checkboxes = document.querySelectorAll('.user-checkbox');
-    const selectAllCheckbox = document.getElementById('select-all');
-    
-    checkboxes.forEach(checkbox => {
-        checkbox.checked = selectAllCheckbox.checked;
-    });
-    
-    updateBulkActions();
-}
-
-function updateBulkActions() {
-    const checkedBoxes = document.querySelectorAll('.user-checkbox:checked');
-    const bulkActions = document.getElementById('bulk-actions');
-    
-    if (checkedBoxes.length > 0) {
-        bulkActions.style.display = 'block';
-        document.getElementById('selected-count').textContent = checkedBoxes.length;
-    } else {
-        bulkActions.style.display = 'none';
-    }
-}
-
-function bulkDeleteUsers() {
-    const checkedBoxes = document.querySelectorAll('.user-checkbox:checked');
-    const userCount = checkedBoxes.length;
-    
-    if (userCount === 0) {
-        alert('Please select users to delete');
-        return;
-    }
-    
-    if (!confirm(`Are you sure you want to delete ${userCount} user(s)?`)) {
-        return;
-    }
-    
-    // Collect user information
-    const usersToDelete = Array.from(checkedBoxes).map(checkbox => ({
-        id: checkbox.dataset.userId,
-        username: checkbox.dataset.username,
-        realm: checkbox.dataset.realm
-    }));
-    
-    // Delete users one by one (in a real implementation, this would be a batch operation)
-    Promise.all(usersToDelete.map(user => 
-        fetch(`/admin/users/${user.id}?username=${user.username}&realm=${user.realm}`, {
-            method: 'DELETE'
-        })
-    )).then(responses => {
-        const allSuccessful = responses.every(response => response.ok);
-        if (allSuccessful) {
-            location.reload();
-        } else {
-            alert('Some users could not be deleted. Please refresh and try again.');
-        }
-    }).catch(error => {
-        alert('Error deleting users: ' + error.message);
-    });
-}
-
-// Utility functions
-function debounce(func, wait) {
-    let timeout;
-    return function executedFunction(...args) {
-        const later = () => {
-            clearTimeout(timeout);
-            func(...args);
-        };
-        clearTimeout(timeout);
-        timeout = setTimeout(later, wait);
+    const descriptions = {
+        'simultaneous': 'All members will be called at the same time. The first to answer gets the call.',
+        'sequential': 'Members will be called one by one in priority order until someone answers.',
+        'round_robin': 'Members will be called in rotation, distributing calls evenly.',
+        'longest_idle': 'The member who has been idle the longest will be called first.'
     };
+    
+    const selectedStrategy = strategySelect.value;
+    descriptionDiv.textContent = descriptions[selectedStrategy] || '';
 }
 
-// Initialize real-time validation when DOM is loaded
-document.addEventListener('DOMContentLoaded', setupRealTimeValidation);
+// Add event listener for strategy selection
+document.addEventListener('DOMContentLoaded', function() {
+    const strategySelect = document.getElementById('strategy');
+    if (strategySelect) {
+        strategySelect.addEventListener('change', updateStrategyDescription);
+        updateStrategyDescription(); // Initial call
+    }
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', function(e) {
+    // Ctrl+N or Cmd+N for new item
+    if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+        e.preventDefault();
+        const newButton = document.querySelector('a[href*="/new"]');
+        if (newButton) {
+            newButton.click();
+        }
+    }
+    
+    // Escape to cancel forms
+    if (e.key === 'Escape') {
+        const addMemberForm = document.getElementById('add-member-form');
+        if (addMemberForm && addMemberForm.style.display !== 'none') {
+            hideAddMemberForm();
+        }
+    }
+});
+
+// Export functions for global access
+window.deleteUser = deleteUser;
+window.deleteHuntGroup = deleteHuntGroup;
+window.viewStatistics = viewStatistics;
+window.removeMember = removeMember;
+window.showAddMemberForm = showAddMemberForm;
+window.hideAddMemberForm = hideAddMemberForm;

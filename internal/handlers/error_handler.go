@@ -50,6 +50,8 @@ type DetailedValidationError struct {
 	Context       map[string]interface{}
 }
 
+
+
 // Error implements the error interface
 func (dve *DetailedValidationError) Error() string {
 	var parts []string
@@ -84,11 +86,26 @@ type ErrorHandler interface {
 	// HandleTransportError handles transport-related errors
 	HandleTransportError(err error, req *parser.SIPMessage) *parser.SIPMessage
 	
+	// HandleTimeoutError handles timeout-related errors
+	HandleTimeoutError(err error, req *parser.SIPMessage) *parser.SIPMessage
+	
+	// HandleAuthenticationError handles authentication-related errors
+	HandleAuthenticationError(err error, req *parser.SIPMessage) *parser.SIPMessage
+	
+	// HandleSessionTimerError handles session timer-related errors
+	HandleSessionTimerError(err error, req *parser.SIPMessage) *parser.SIPMessage
+	
 	// ShouldLogError determines if an error should be logged
 	ShouldLogError(errorType ErrorType, statusCode int) bool
 	
 	// GetErrorStatistics returns error statistics
 	GetErrorStatistics() ErrorStatistics
+	
+	// ResetStatistics resets error statistics
+	ResetStatistics()
+	
+	// IncrementErrorCount increments the error count for a specific type
+	IncrementErrorCount(errorType ErrorType)
 }
 
 // ErrorStatistics holds statistics about errors
