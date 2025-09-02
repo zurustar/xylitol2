@@ -388,30 +388,30 @@
     - Write unit tests for parallel forking and answer selection
     - _Requirements: 15.3, 15.4, 16.2, 16.3, 16.4_
 
-- [ ] 23. Implement SDP handling and media routing for B2BUA
-  - [ ] 23.1 Create SDP offer/answer processing
+- [x] 23. Implement SDP handling and media routing for B2BUA
+  - [x] 23.1 Create SDP offer/answer processing
     - Implement SDP parsing and modification for B2BUA operation
     - Add proper SDP relay between caller and answering member
     - Handle media address and port translation if needed
     - Write unit tests for SDP processing
     - _Requirements: 18.2, 18.3_
 
-  - [ ] 23.2 Implement call termination and cleanup
+  - [x] 23.2 Implement call termination and cleanup
     - Handle BYE requests from either caller or callee
     - Implement proper call leg termination and cleanup
     - Add session statistics collection and storage
     - Write unit tests for call termination scenarios
     - _Requirements: 18.4, 15.5_
 
-- [ ] 24. Implement Hunt Group timeout and error handling
-  - [ ] 24.1 Create hunt group timeout management
+- [x] 24. Implement Hunt Group timeout and error handling
+  - [x] 24.1 Create hunt group timeout management
     - Implement per-hunt-group timeout configuration
     - Add timeout handling when no member answers
     - Create proper error response generation (408 Request Timeout)
     - Write unit tests for timeout scenarios
     - _Requirements: 16.5_
 
-  - [ ] 24.2 Implement hunt group error handling
+  - [x] 24.2 Implement hunt group error handling
     - Handle cases where all members are busy or unavailable
     - Add proper error response aggregation and selection
     - Implement fallback behavior for hunt group failures

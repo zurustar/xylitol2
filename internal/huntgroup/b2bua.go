@@ -29,6 +29,12 @@ type B2BUA struct {
 	// Dialog and transaction management
 	dialogManager      *DialogManager
 	
+	// SDP processing
+	sdpProcessor       *SDPProcessor
+	
+	// Session statistics
+	statsCollector     *SessionStatsCollector
+	
 	// Configuration
 	serverHost string
 	serverPort int
@@ -37,6 +43,10 @@ type B2BUA struct {
 	sessionTimeout time.Duration
 	cleanupTicker  *time.Ticker
 	stopCleanup    chan struct{}
+	
+	// Hunt group timeout management
+	huntGroupTimeouts map[string]*time.Timer  // sessionID -> timeout timer
+	timeoutMutex      sync.RWMutex
 }
 
 // NewB2BUA creates a new B2BUA instance with enhanced session management
@@ -57,10 +67,13 @@ func NewB2BUA(
 		sessionsByCallID:   make(map[string]*B2BUASession),
 		sessionsByLegID:    make(map[string]*B2BUASession),
 		dialogManager:      NewDialogManager(logger),
+		sdpProcessor:       NewSDPProcessor(logger, serverHost, serverPort),
+		statsCollector:     NewSessionStatsCollector(logger),
 		serverHost:         serverHost,
 		serverPort:         serverPort,
 		sessionTimeout:     30 * time.Minute, // Default session timeout
 		stopCleanup:        make(chan struct{}),
+		huntGroupTimeouts:  make(map[string]*time.Timer),
 	}
 	
 	// Start cleanup goroutine
@@ -91,6 +104,14 @@ func (b *B2BUA) startCleanupRoutine() {
 // Stop stops the B2BUA and cleanup routines
 func (b *B2BUA) Stop() {
 	close(b.stopCleanup)
+	
+	// Cancel all active hunt group timeouts
+	b.timeoutMutex.Lock()
+	for sessionID, timer := range b.huntGroupTimeouts {
+		timer.Stop()
+		delete(b.huntGroupTimeouts, sessionID)
+	}
+	b.timeoutMutex.Unlock()
 }
 
 // CreateSession creates a new B2BUA session for direct calls
@@ -197,6 +218,9 @@ func (b *B2BUA) CreateSession(callerInvite *parser.SIPMessage, calleeURI string)
 	b.sessionsByLegID[calleeLeg.LegID] = session
 	b.sessionMutex.Unlock()
 
+	// Start session statistics collection
+	b.statsCollector.StartSession(session)
+
 	b.logger.Info("B2BUA session created",
 		logging.Field{Key: "session_id", Value: sessionID},
 		logging.Field{Key: "caller_leg_id", Value: callerLeg.LegID},
@@ -257,10 +281,19 @@ func (b *B2BUA) CreateHuntGroupSession(callerInvite *parser.SIPMessage, huntGrou
 	b.sessionsByLegID[callerLeg.LegID] = session
 	b.sessionMutex.Unlock()
 
+	// Start session statistics collection
+	b.statsCollector.StartSession(session)
+
+	// Start hunt group timeout if configured
+	if huntGroup.RingTimeout > 0 {
+		b.StartHuntGroupTimeout(sessionID, huntGroup.RingTimeout)
+	}
+
 	b.logger.Info("B2BUA hunt group session created",
 		logging.Field{Key: "session_id", Value: sessionID},
 		logging.Field{Key: "hunt_group_id", Value: huntGroup.ID},
 		logging.Field{Key: "hunt_group_extension", Value: huntGroup.Extension},
+		logging.Field{Key: "ring_timeout", Value: huntGroup.RingTimeout},
 		logging.Field{Key: "caller", Value: callerLeg.FromURI})
 
 	return session, nil
@@ -376,6 +409,7 @@ func (b *B2BUA) EndSession(sessionID string) error {
 	b.sessionMutex.Lock()
 	session, exists := b.activeSessions[sessionID]
 	if exists {
+		b.removeSessionFromIndices(session)
 		delete(b.activeSessions, sessionID)
 	}
 	b.sessionMutex.Unlock()
@@ -385,10 +419,25 @@ func (b *B2BUA) EndSession(sessionID string) error {
 	}
 
 	now := time.Now().UTC()
-	session.Status = B2BUAStatusEnded
+	// Only set status to ended if it's not already failed
+	if session.Status != B2BUAStatusFailed {
+		session.Status = B2BUAStatusEnded
+	}
 	session.EndTime = &now
-	session.CallerLeg.Status = CallLegStatusEnded
-	session.CalleeLeg.Status = CallLegStatusEnded
+	if session.CallerLeg != nil {
+		session.CallerLeg.Status = CallLegStatusEnded
+	}
+	if session.CalleeLeg != nil {
+		session.CalleeLeg.Status = CallLegStatusEnded
+	}
+
+	// End all pending legs
+	for _, leg := range session.PendingLegs {
+		leg.Status = CallLegStatusEnded
+	}
+
+	// Cancel hunt group timeout if active
+	b.CancelHuntGroupTimeout(sessionID)
 
 	b.logger.Info("B2BUA session ended",
 		logging.Field{Key: "session_id", Value: sessionID})
@@ -467,6 +516,16 @@ func (b *B2BUA) BridgeCalls(sessionID string) error {
 	session.CallerLeg.Status = CallLegStatusConnected
 	session.CalleeLeg.Status = CallLegStatusConnected
 
+	// Update session statistics for connection
+	answeredMember := ""
+	if session.CalleeLeg != nil {
+		answeredMember = session.CalleeLeg.ToURI
+	}
+	b.statsCollector.UpdateSessionConnect(sessionID, now, answeredMember)
+
+	// Cancel hunt group timeout since call is now connected
+	b.CancelHuntGroupTimeout(sessionID)
+
 	b.logger.Info("B2BUA calls bridged",
 		logging.Field{Key: "session_id", Value: sessionID})
 
@@ -487,6 +546,21 @@ func (b *B2BUA) TransferCall(sessionID string, targetURI string) error {
 	// Implementation would create a new callee leg and transfer the call
 	// This is a complex operation that would involve REFER or re-INVITE
 	return fmt.Errorf("call transfer not implemented")
+}
+
+// GetSessionStatistics retrieves statistics for a session
+func (b *B2BUA) GetSessionStatistics(sessionID string) *SessionStatistics {
+	return b.statsCollector.GetSessionStats(sessionID)
+}
+
+// GetAllSessionStatistics retrieves all session statistics
+func (b *B2BUA) GetAllSessionStatistics() []*SessionStatistics {
+	return b.statsCollector.GetAllStats()
+}
+
+// CleanupSessionStatistics removes old session statistics
+func (b *B2BUA) CleanupSessionStatistics(olderThan time.Duration) int {
+	return b.statsCollector.CleanupStats(olderThan)
 }
 
 // Private helper methods
@@ -540,12 +614,16 @@ func (b *B2BUA) handleCallerBye(session *B2BUASession, bye *parser.SIPMessage) e
 		callerDialog.UpdateRemoteCSeq(cseqNum)
 	}
 
-	// Create BYE for callee leg
-	calleeBye := b.createCalleeBye(session, bye)
-	
-	// Send BYE to callee
-	if err := b.sendMessageToCallee(session, calleeBye); err != nil {
-		return fmt.Errorf("failed to send BYE to callee: %w", err)
+	// Create BYE for callee leg if callee exists
+	if session.CalleeLeg != nil {
+		calleeBye := b.createCalleeBye(session, bye)
+		
+		// Send BYE to callee
+		if err := b.sendMessageToCallee(session, calleeBye); err != nil {
+			b.logger.Warn("Failed to send BYE to callee",
+				logging.Field{Key: "session_id", Value: session.SessionID},
+				logging.Field{Key: "error", Value: err.Error()})
+		}
 	}
 
 	// Send 200 OK to caller
@@ -554,12 +632,27 @@ func (b *B2BUA) handleCallerBye(session *B2BUASession, bye *parser.SIPMessage) e
 		return fmt.Errorf("failed to send BYE response to caller: %w", err)
 	}
 
+	// Collect session statistics
+	now := time.Now().UTC()
+	b.statsCollector.EndSession(session.SessionID, now, "BYE", "caller")
+
 	// Terminate dialogs
 	if callerDialog := b.dialogManager.GetDialog(session.CallerLeg.DialogID); callerDialog != nil {
 		b.dialogManager.TerminateDialog(callerDialog.DialogID)
 	}
-	if calleeDialog := b.dialogManager.GetDialog(session.CalleeLeg.DialogID); calleeDialog != nil {
-		b.dialogManager.TerminateDialog(calleeDialog.DialogID)
+	if session.CalleeLeg != nil {
+		if calleeDialog := b.dialogManager.GetDialog(session.CalleeLeg.DialogID); calleeDialog != nil {
+			b.dialogManager.TerminateDialog(calleeDialog.DialogID)
+		}
+	}
+
+	// Cancel any pending legs for hunt group sessions
+	if len(session.PendingLegs) > 0 {
+		if err := b.CancelPendingLegs(session.SessionID, ""); err != nil {
+			b.logger.Warn("Failed to cancel pending legs",
+				logging.Field{Key: "session_id", Value: session.SessionID},
+				logging.Field{Key: "error", Value: err.Error()})
+		}
 	}
 
 	// End session
@@ -683,6 +776,18 @@ func (b *B2BUA) handleCalleeBye(session *B2BUASession, bye *parser.SIPMessage) e
 		return fmt.Errorf("failed to send BYE response to callee: %w", err)
 	}
 
+	// Collect session statistics
+	now := time.Now().UTC()
+	b.statsCollector.EndSession(session.SessionID, now, "BYE", "callee")
+
+	// Terminate dialogs
+	if callerDialog := b.dialogManager.GetDialog(session.CallerLeg.DialogID); callerDialog != nil {
+		b.dialogManager.TerminateDialog(callerDialog.DialogID)
+	}
+	if calleeDialog := b.dialogManager.GetDialog(session.CalleeLeg.DialogID); calleeDialog != nil {
+		b.dialogManager.TerminateDialog(calleeDialog.DialogID)
+	}
+
 	// End session
 	return b.EndSession(session.SessionID)
 }
@@ -733,6 +838,20 @@ func (b *B2BUA) createCalleeInvite(session *B2BUASession, callerInvite *parser.S
 	
 	// Set Max-Forwards
 	invite.SetHeader(parser.HeaderMaxForwards, "70")
+	
+	// Process SDP if present
+	if len(invite.Body) > 0 {
+		originalSDP := string(invite.Body)
+		modifiedSDP, err := b.sdpProcessor.RelaySDPOffer(originalSDP, session)
+		if err != nil {
+			b.logger.Warn("Failed to process SDP offer, using original",
+				logging.Field{Key: "session_id", Value: session.SessionID},
+				logging.Field{Key: "error", Value: err.Error()})
+		} else {
+			invite.Body = []byte(modifiedSDP)
+			invite.SetHeader(parser.HeaderContentLength, fmt.Sprintf("%d", len(modifiedSDP)))
+		}
+	}
 	
 	return invite
 }
@@ -831,6 +950,20 @@ func (b *B2BUA) createCallerResponse(session *B2BUASession, calleeResponse *pars
 	
 	// Update Contact header to point to us
 	response.SetHeader(parser.HeaderContact, session.CallerLeg.ContactURI)
+	
+	// Process SDP answer if present in 2xx response
+	if response.GetStatusCode() >= 200 && response.GetStatusCode() < 300 && len(response.Body) > 0 {
+		originalSDP := string(response.Body)
+		modifiedSDP, err := b.sdpProcessor.RelaySDPAnswer(originalSDP, session)
+		if err != nil {
+			b.logger.Warn("Failed to process SDP answer, using original",
+				logging.Field{Key: "session_id", Value: session.SessionID},
+				logging.Field{Key: "error", Value: err.Error()})
+		} else {
+			response.Body = []byte(modifiedSDP)
+			response.SetHeader(parser.HeaderContentLength, fmt.Sprintf("%d", len(modifiedSDP)))
+		}
+	}
 	
 	// Preserve Via headers from original request (they should be in reverse order)
 	// The response will traverse back through the same path
@@ -1064,6 +1197,9 @@ func (b *B2BUA) CancelPendingLegs(sessionID string, exceptLegID string) error {
 	
 	for _, leg := range pendingLegs {
 		if leg.LegID != exceptLegID {
+			// Set leg status to cancelled
+			leg.SetStatus(CallLegStatusCancelled)
+			
 			// Send CANCEL to this leg
 			cancelMsg := b.createCancelForLeg(leg)
 			if err := b.sendMessageToLeg(leg, cancelMsg); err != nil {
@@ -1173,4 +1309,379 @@ func (b *B2BUA) sendMessageToLeg(leg *CallLeg, message *parser.SIPMessage) error
 		logging.Field{Key: "method", Value: message.GetMethod()})
 
 	return b.transportManager.SendMessage(data, "udp", leg.RemoteAddr)
+}
+
+// Hunt Group Timeout Management
+
+// StartHuntGroupTimeout starts a timeout timer for a hunt group session
+func (b *B2BUA) StartHuntGroupTimeout(sessionID string, timeoutSeconds int) {
+	if timeoutSeconds <= 0 {
+		return // No timeout configured
+	}
+
+	timeout := time.Duration(timeoutSeconds) * time.Second
+	timer := time.AfterFunc(timeout, func() {
+		b.handleHuntGroupTimeout(sessionID)
+	})
+
+	b.timeoutMutex.Lock()
+	// Cancel existing timer if any
+	if existingTimer, exists := b.huntGroupTimeouts[sessionID]; exists {
+		existingTimer.Stop()
+	}
+	b.huntGroupTimeouts[sessionID] = timer
+	b.timeoutMutex.Unlock()
+
+	b.logger.Debug("Started hunt group timeout",
+		logging.Field{Key: "session_id", Value: sessionID},
+		logging.Field{Key: "timeout_seconds", Value: timeoutSeconds})
+}
+
+// CancelHuntGroupTimeout cancels the timeout timer for a hunt group session
+func (b *B2BUA) CancelHuntGroupTimeout(sessionID string) {
+	b.timeoutMutex.Lock()
+	defer b.timeoutMutex.Unlock()
+
+	if timer, exists := b.huntGroupTimeouts[sessionID]; exists {
+		timer.Stop()
+		delete(b.huntGroupTimeouts, sessionID)
+		
+		b.logger.Debug("Cancelled hunt group timeout",
+			logging.Field{Key: "session_id", Value: sessionID})
+	}
+}
+
+// handleHuntGroupTimeout handles hunt group timeout when no member answers
+func (b *B2BUA) handleHuntGroupTimeout(sessionID string) {
+	b.logger.Info("Hunt group timeout occurred",
+		logging.Field{Key: "session_id", Value: sessionID})
+
+	session, err := b.GetSession(sessionID)
+	if err != nil {
+		b.logger.Error("Failed to get session for timeout handling",
+			logging.Field{Key: "session_id", Value: sessionID},
+			logging.Field{Key: "error", Value: err.Error()})
+		return
+	}
+
+	// Send 408 Request Timeout to caller
+	if err := b.sendTimeoutResponseToCaller(session); err != nil {
+		b.logger.Error("Failed to send timeout response to caller",
+			logging.Field{Key: "session_id", Value: sessionID},
+			logging.Field{Key: "error", Value: err.Error()})
+	}
+
+	// Update session status
+	session.SetStatus(B2BUAStatusFailed)
+
+	// Clean up timeout timer
+	b.timeoutMutex.Lock()
+	delete(b.huntGroupTimeouts, sessionID)
+	b.timeoutMutex.Unlock()
+
+	// End session
+	if err := b.EndSession(sessionID); err != nil {
+		b.logger.Error("Failed to end session after timeout",
+			logging.Field{Key: "session_id", Value: sessionID},
+			logging.Field{Key: "error", Value: err.Error()})
+	}
+}
+
+// sendTimeoutResponseToCaller sends a 408 Request Timeout response to the caller
+func (b *B2BUA) sendTimeoutResponseToCaller(session *B2BUASession) error {
+	response := parser.NewResponseMessage(408, "Request Timeout")
+	
+	// Set required headers from caller leg
+	response.SetHeader(parser.HeaderCallID, session.CallerLeg.CallID)
+	response.SetHeader(parser.HeaderFrom, session.CallerLeg.FromURI)
+	response.SetHeader(parser.HeaderTo, session.CallerLeg.ToURI)
+	response.SetHeader(parser.HeaderCSeq, "1 INVITE")
+	response.SetHeader(parser.HeaderContentLength, "0")
+	
+	// Add Via headers
+	viaHeader := fmt.Sprintf("SIP/2.0/UDP %s:%d;branch=z9hG4bK-%d", 
+		b.serverHost, b.serverPort, time.Now().UnixNano())
+	response.AddHeader(parser.HeaderVia, viaHeader)
+
+	return b.sendMessageToCaller(session, response)
+}
+
+// Hunt Group Error Handling
+
+// HuntGroupErrorType represents different types of hunt group errors
+type HuntGroupErrorType string
+
+const (
+	HuntGroupErrorAllBusy        HuntGroupErrorType = "all_busy"
+	HuntGroupErrorAllUnavailable HuntGroupErrorType = "all_unavailable"
+	HuntGroupErrorNoMembers      HuntGroupErrorType = "no_members"
+	HuntGroupErrorTimeout        HuntGroupErrorType = "timeout"
+	HuntGroupErrorInternalError  HuntGroupErrorType = "internal_error"
+)
+
+// HuntGroupErrorAggregator tracks error responses from hunt group members
+type HuntGroupErrorAggregator struct {
+	SessionID     string
+	TotalMembers  int
+	Responses     map[string]int // status code -> count
+	BusyMembers   []string
+	UnavailableMembers []string
+	FailedMembers []string
+	mutex         sync.RWMutex
+}
+
+// NewHuntGroupErrorAggregator creates a new error aggregator
+func NewHuntGroupErrorAggregator(sessionID string, totalMembers int) *HuntGroupErrorAggregator {
+	return &HuntGroupErrorAggregator{
+		SessionID:          sessionID,
+		TotalMembers:       totalMembers,
+		Responses:          make(map[string]int),
+		BusyMembers:        make([]string, 0),
+		UnavailableMembers: make([]string, 0),
+		FailedMembers:      make([]string, 0),
+	}
+}
+
+// AddResponse adds a response from a hunt group member
+func (hea *HuntGroupErrorAggregator) AddResponse(memberURI string, statusCode int) {
+	hea.mutex.Lock()
+	defer hea.mutex.Unlock()
+
+	statusStr := fmt.Sprintf("%d", statusCode)
+	hea.Responses[statusStr]++
+
+	switch {
+	case statusCode == 486 || statusCode == 600: // Busy Here or Busy Everywhere
+		hea.BusyMembers = append(hea.BusyMembers, memberURI)
+	case statusCode == 480 || statusCode == 503: // Temporarily Unavailable or Service Unavailable
+		hea.UnavailableMembers = append(hea.UnavailableMembers, memberURI)
+	case statusCode >= 400:
+		hea.FailedMembers = append(hea.FailedMembers, memberURI)
+	}
+}
+
+// GetBestErrorResponse determines the best error response to send to caller
+func (hea *HuntGroupErrorAggregator) GetBestErrorResponse() (int, string) {
+	hea.mutex.RLock()
+	defer hea.mutex.RUnlock()
+
+	totalResponses := 0
+	for _, count := range hea.Responses {
+		totalResponses += count
+	}
+
+	// If we haven't received all responses yet, wait
+	if totalResponses < hea.TotalMembers {
+		return 0, "" // Not ready yet
+	}
+
+	// Priority order for error responses:
+	// 1. If any member is busy, return 486 Busy Here
+	// 2. If any member is unavailable, return 480 Temporarily Unavailable
+	// 3. If all failed with other errors, return 500 Internal Server Error
+	// 4. Default to 404 Not Found
+
+	if len(hea.BusyMembers) > 0 {
+		return 486, "Busy Here"
+	}
+
+	if len(hea.UnavailableMembers) > 0 {
+		return 480, "Temporarily Unavailable"
+	}
+
+	if len(hea.FailedMembers) > 0 {
+		return 500, "Internal Server Error"
+	}
+
+	return 404, "Not Found"
+}
+
+// IsComplete returns true if all members have responded
+func (hea *HuntGroupErrorAggregator) IsComplete() bool {
+	hea.mutex.RLock()
+	defer hea.mutex.RUnlock()
+
+	totalResponses := 0
+	for _, count := range hea.Responses {
+		totalResponses += count
+	}
+
+	return totalResponses >= hea.TotalMembers
+}
+
+// HandleHuntGroupError handles various error conditions in hunt group processing
+func (b *B2BUA) HandleHuntGroupError(sessionID string, errorType HuntGroupErrorType, details string) error {
+	session, err := b.GetSession(sessionID)
+	if err != nil {
+		return fmt.Errorf("session not found: %w", err)
+	}
+
+	b.logger.Warn("Hunt group error occurred",
+		logging.Field{Key: "session_id", Value: sessionID},
+		logging.Field{Key: "error_type", Value: string(errorType)},
+		logging.Field{Key: "details", Value: details})
+
+	var statusCode int
+	var reasonPhrase string
+
+	switch errorType {
+	case HuntGroupErrorAllBusy:
+		statusCode = 486
+		reasonPhrase = "Busy Here"
+	case HuntGroupErrorAllUnavailable:
+		statusCode = 480
+		reasonPhrase = "Temporarily Unavailable"
+	case HuntGroupErrorNoMembers:
+		statusCode = 404
+		reasonPhrase = "Not Found"
+	case HuntGroupErrorTimeout:
+		statusCode = 408
+		reasonPhrase = "Request Timeout"
+	case HuntGroupErrorInternalError:
+		statusCode = 500
+		reasonPhrase = "Internal Server Error"
+	default:
+		statusCode = 500
+		reasonPhrase = "Internal Server Error"
+	}
+
+	// Cancel any pending legs
+	if err := b.CancelPendingLegs(sessionID, ""); err != nil {
+		b.logger.Error("Failed to cancel pending legs on error",
+			logging.Field{Key: "session_id", Value: sessionID},
+			logging.Field{Key: "error", Value: err.Error()})
+	}
+
+	// Send error response to caller
+	if err := b.sendErrorResponseToCaller(session, statusCode, reasonPhrase); err != nil {
+		b.logger.Error("Failed to send error response to caller",
+			logging.Field{Key: "session_id", Value: sessionID},
+			logging.Field{Key: "error", Value: err.Error()})
+	}
+
+	// Update session status
+	session.SetStatus(B2BUAStatusFailed)
+
+	// Cancel timeout timer
+	b.CancelHuntGroupTimeout(sessionID)
+
+	// End session
+	return b.EndSession(sessionID)
+}
+
+// sendErrorResponseToCaller sends an error response to the caller
+func (b *B2BUA) sendErrorResponseToCaller(session *B2BUASession, statusCode int, reasonPhrase string) error {
+	response := parser.NewResponseMessage(statusCode, reasonPhrase)
+	
+	// Set required headers from caller leg
+	response.SetHeader(parser.HeaderCallID, session.CallerLeg.CallID)
+	response.SetHeader(parser.HeaderFrom, session.CallerLeg.FromURI)
+	response.SetHeader(parser.HeaderTo, session.CallerLeg.ToURI)
+	response.SetHeader(parser.HeaderCSeq, "1 INVITE")
+	response.SetHeader(parser.HeaderContentLength, "0")
+	
+	// Add Via headers
+	viaHeader := fmt.Sprintf("SIP/2.0/UDP %s:%d;branch=z9hG4bK-%d", 
+		b.serverHost, b.serverPort, time.Now().UnixNano())
+	response.AddHeader(parser.HeaderVia, viaHeader)
+
+	return b.sendMessageToCaller(session, response)
+}
+
+
+
+// HandleMemberResponse handles responses from hunt group members
+func (b *B2BUA) HandleMemberResponse(sessionID string, legID string, response *parser.SIPMessage, aggregator *HuntGroupErrorAggregator) error {
+	session, err := b.GetSession(sessionID)
+	if err != nil {
+		return err
+	}
+
+	statusCode := response.GetStatusCode()
+	leg := session.GetPendingLeg(legID)
+	if leg == nil {
+		return fmt.Errorf("pending leg not found: %s", legID)
+	}
+
+	b.logger.Debug("Handling hunt group member response",
+		logging.Field{Key: "session_id", Value: sessionID},
+		logging.Field{Key: "leg_id", Value: legID},
+		logging.Field{Key: "status_code", Value: statusCode})
+
+	// Handle successful response (200 OK)
+	if statusCode >= 200 && statusCode < 300 {
+		// First successful response wins
+		b.logger.Info("Hunt group member answered",
+			logging.Field{Key: "session_id", Value: sessionID},
+			logging.Field{Key: "leg_id", Value: legID})
+
+		// Set this leg as the answered leg
+		session.SetAnsweredLeg(legID)
+
+		// Cancel all other pending legs
+		if err := b.CancelPendingLegs(sessionID, legID); err != nil {
+			b.logger.Error("Failed to cancel other pending legs",
+				logging.Field{Key: "session_id", Value: sessionID},
+				logging.Field{Key: "error", Value: err.Error()})
+		}
+
+		// Cancel hunt group timeout
+		b.CancelHuntGroupTimeout(sessionID)
+
+		// Forward response to caller
+		return b.forwardResponseToCaller(session, response)
+	}
+
+	// Handle error responses
+	if statusCode >= 300 {
+		// Extract member URI for error tracking
+		memberURI := ExtractURIFromHeader(leg.ToURI)
+		aggregator.AddResponse(memberURI, statusCode)
+
+		// Update leg status
+		switch {
+		case statusCode == 486 || statusCode == 600:
+			leg.SetStatus(CallLegStatusFailed) // Busy
+		case statusCode == 480 || statusCode == 503:
+			leg.SetStatus(CallLegStatusFailed) // Unavailable
+		default:
+			leg.SetStatus(CallLegStatusFailed) // Other error
+		}
+
+		// Remove this leg from pending
+		session.RemovePendingLeg(legID)
+
+		// Check if all members have responded with errors
+		if aggregator.IsComplete() {
+			statusCode, reasonPhrase := aggregator.GetBestErrorResponse()
+			if statusCode > 0 {
+				return b.HandleHuntGroupError(sessionID, b.mapStatusToErrorType(statusCode), reasonPhrase)
+			}
+		}
+	}
+
+	return nil
+}
+
+// forwardResponseToCaller forwards a response to the caller
+func (b *B2BUA) forwardResponseToCaller(session *B2BUASession, response *parser.SIPMessage) error {
+	// Create response for caller with appropriate headers
+	callerResponse := b.createCallerResponse(session, response)
+	return b.sendMessageToCaller(session, callerResponse)
+}
+
+// mapStatusToErrorType maps SIP status codes to hunt group error types
+func (b *B2BUA) mapStatusToErrorType(statusCode int) HuntGroupErrorType {
+	switch statusCode {
+	case 486, 600:
+		return HuntGroupErrorAllBusy
+	case 480, 503:
+		return HuntGroupErrorAllUnavailable
+	case 408:
+		return HuntGroupErrorTimeout
+	case 404:
+		return HuntGroupErrorNoMembers
+	default:
+		return HuntGroupErrorInternalError
+	}
 }
