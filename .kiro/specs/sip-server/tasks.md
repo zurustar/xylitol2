@@ -357,15 +357,15 @@
     - Write integration tests for web interface functionality
     - _Requirements: 17.1, 17.2, 17.3, 17.4, 17.5_
 
-- [ ] 21. Implement B2BUA (Back-to-Back User Agent) core functionality
-  - [ ] 21.1 Create B2BUA session management
+- [x] 21. Implement B2BUA (Back-to-Back User Agent) core functionality
+  - [x] 21.1 Create B2BUA session management
     - Implement B2BUASession and CallLeg data structures
     - Create session state management with proper state transitions
     - Add session storage and lookup functionality
     - Write unit tests for session lifecycle management
     - _Requirements: 18.1, 18.4_
 
-  - [ ] 21.2 Implement SIP dialog and transaction handling for B2BUA
+  - [x] 21.2 Implement SIP dialog and transaction handling for B2BUA
     - Create separate SIP dialogs for caller and callee sides
     - Implement proper Call-ID, From/To tag management for each leg
     - Add transaction correlation between A-leg and B-legs
